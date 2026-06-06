@@ -30,6 +30,14 @@ from typing import Any, AsyncIterator
 log = logging.getLogger("agent-bus")
 
 
+class ChannelRedirect(Exception):
+    """Raised when the server redirects the agent to a different channel hash."""
+    def __init__(self, new_token: str, entry_token: str | None = None):
+        self.new_token = new_token
+        self.entry_token = entry_token
+        super().__init__(f"Redirect to channel {new_token[:16]}…")
+
+
 class HermesBusConnection:
     """Conexión WebSocket de un agente al AgentBus.
 
@@ -81,7 +89,15 @@ class HermesBusConnection:
     # ── Conexión ──────────────────────────────────────────────────────
 
     async def connect(self) -> None:
-        """Conecta al servidor WebSocket y arranca el reader en background."""
+        """Conecta al servidor WebSocket y arranca el reader en background.
+        
+        Si el servidor responde con channel_redirect, la conexión se
+        re-establece automáticamente con el token correcto.
+        
+        Raises:
+            ChannelRedirect: después de 3 intentos de redirect fallidos
+            ConnectionError: si no se puede registrar
+        """
         import websockets
 
         self._send_lock = asyncio.Lock()
@@ -97,6 +113,24 @@ class HermesBusConnection:
 
         # Leer respuesta de registro directamente (reader aún no arrancó)
         resp = json.loads(await self.ws.recv())
+
+        # ── Canal hash redirect ─────────────────────────────────────────
+        # Si el server nos dice "usá este otro token", reconectamos.
+        redirect_attempts = getattr(self, '_redirect_attempts', 0)
+        if resp.get("type") == "channel_redirect":
+            new_token = resp.get("token", "")
+            if not new_token:
+                raise ConnectionError("channel_redirect sin token")
+            if redirect_attempts >= 3:
+                raise ChannelRedirect(new_token, resp.get("entry_token"))
+            self._redirect_attempts = redirect_attempts + 1
+            log.info("🔄 Redirected to canal hash %s… (attempt %d/3)",
+                     new_token[:12], self._redirect_attempts)
+            await self.ws.close()
+            self.token = new_token
+            await self.connect()  # reconecta con el nuevo token
+            return
+
         if resp.get("status") != "ok":
             raise ConnectionError(f"Error registrando agente: {resp.get('message')}")
 

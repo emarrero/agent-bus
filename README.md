@@ -350,10 +350,46 @@ AGENT_BUS_TOKEN="soporte" agent-bus register --name "Agente Soporte"
 
 ---
 
-## API HTTP (servidor HTTP simple)
+## Canal Hash (Convergencia de Red)
+
+Cuando el servidor se inicia con `--entry-token`, define un **canal canónico** al que todos los agentes deben converger. Los agentes que se conectan con un token diferente reciben un mensaje `channel_redirect` con el token correcto.
+
+**Mecanismo:**
+
+1. El servidor se inicia con `--entry-token CANONICAL_TOKEN`
+2. Ese token es el canal canónico de la red
+3. Cuando un agente se conecta con un token **diferente**, el servidor:
+   - Envía un mensaje `channel_redirect` con el token correcto
+   - **No cierra la conexión** — los clientes antiguos siguen funcionando
+4. Los clientes que entienden `channel_redirect` reconectan automáticamente con el token correcto
+5. Todos los agentes convergen en el mismo canal
+
+```bash
+# Servidor con canal canónico
+python3 server_ws.py --entry-token "mi_token_secreto" --ws-port 9876 --http-port 9877
+
+# Los clientes pueden conectarse con cualquier token;
+# el servidor los redirige al canal correcto
+export AGENT_BUS_TOKEN="otro_token"
+python3 node.py --name "Agente Viajero"  # ← recibirá redirect
+```
+
+### Cómo maneja el cliente el redirect
+
+El cliente `HermesBusConnection.connect()` en `hermes_agent.py` detecta el mensaje `channel_redirect` y:
+1. Cierra la conexión actual
+2. Actualiza su token al nuevo canal
+3. Reconecta automáticamente (hasta 3 intentos)
+4. El nodo `node.py` persiste el token actualizado para futuras reconexiones
+
+Esto asegura que **todos los agentes terminen en el mismo canal**, incluso si se configuraron con tokens diferentes.
+
+---
+
+## API HTTP (servidor WebSocket)
 
 Endpoint | Método | Descripción
----|---|---
+---|---|---|---
 `/register` | POST | Registrar un agente
 `/unregister` | POST | Dar de baja un agente
 `/message` | POST | Enviar mensaje
@@ -362,10 +398,20 @@ Endpoint | Método | Descripción
 `/task` | GET | Reclamar tarea (`?agent_id=ID`) o consultar (`?task_id=ID`)
 `/task/complete` | POST | Completar tarea
 `/agents` | GET | Listar agentes en la red
+`/kick` | POST | Desconectar un agente forzadamente
 `/health` | GET | Health check
 `/stats` | GET | Estadísticas
 
 Todas las rutas requieren el header `X-Agent-Token: <token>` o parámetro `?token=`.
+
+### Opciones del servidor WebSocket
+
+| Parámetro | Descripción |
+|---|---|
+| `--ws-host` | Host para WebSocket (default: `0.0.0.0`) |
+| `--ws-port` | Puerto WebSocket (default: `9876`) |
+| `--http-port` | Puerto HTTP / monitor (default: `9877`) |
+| `--entry-token` | Token canónico para canal hash. Agentes que se conecten con otro token reciben `channel_redirect` |
 
 ---
 
@@ -380,7 +426,7 @@ Todas las rutas requieren el header `X-Agent-Token: <token>` o parámetro `?toke
 ### Mensajes entrantes (del servidor)
 
 | Tipo | Descripción |
-|---|---|
+|---|---|---|
 | `new_message` | Nuevo mensaje de otro agente |
 | `agent_joined` | Un agente se conectó |
 | `agent_left` | Un agente se desconectó |
@@ -388,6 +434,7 @@ Todas las rutas requieren el header `X-Agent-Token: <token>` o parámetro `?toke
 | `task_completed` | Una tarea delegada fue completada |
 | `task_ack` | Confirmación de tarea recibida |
 | `message_ack` | Confirmación de mensaje recibido |
+| `channel_redirect` | Redirección al canal canónico (contiene `token` correcto) |
 | `pong` | Respuesta a ping |
 
 ### Mensajes salientes (del agente)

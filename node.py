@@ -288,17 +288,24 @@ async def run(args: argparse.Namespace) -> None:
     from agent_bus.hermes_agent import connect_to_bus
 
     delay = 5
+    # Track the actual token (may change via channel redirect)
+    actual_token = args.token
 
     while True:
         bus = None
         try:
             bus = await connect_to_bus(
                 agent_id=args.agent_id,
-                token=args.token,
+                token=actual_token,
                 server=args.server,
                 name=args.name,
                 skills=args.skills_list,
             )
+            # Capture the token after redirect, so reconnects use the correct one
+            if bus.token != actual_token:
+                log.info("🔐 Canal hash actualizado: %s→%s", actual_token[:12], bus.token[:12])
+                actual_token = bus.token
+                args.token = bus.token  # update for future use
             log.info("Connected as '%s' (%s) on %s",
                      args.agent_id, args.name, args.server)
             delay = 5

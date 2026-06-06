@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import hashlib
 import json
 import logging
 import time
@@ -126,7 +127,7 @@ class WebSocketAgentBusServer:
     in real time by channel (token).
     """
 
-    def __init__(self, http_port: int = 9877):
+    def __init__(self, http_port: int = 9877, entry_token: str | None = None):
         self.bus = AgentBusServer()
         self.http_port = http_port
 
@@ -140,6 +141,23 @@ class WebSocketAgentBusServer:
         self.flow = FlowRecorder()
 
         self.start_time = time.time()
+
+        # Canal hash mechanism: entry_token → stable channel hash
+        self.entry_token: str | None = None
+        self.channel_hash: str | None = None
+        if entry_token:
+            self._set_channel(entry_token)
+
+    def _set_channel(self, entry_token: str) -> None:
+        """Set the canonical channel for the network.
+        
+        The entry token IS the canonical channel. Agents that connect
+        with a different token receive an advisory redirect to this one.
+        This ensures all agents converge on the same stable channel.
+        """
+        self.entry_token = entry_token
+        self.channel_hash = entry_token
+        log.info("🔐 Canal canónico: %s (entry-token)", entry_token[:16])
 
     async def handle_client(self, websocket, path: str = "/"):
         """Handle a WebSocket connection from an agent.
@@ -180,6 +198,27 @@ class WebSocketAgentBusServer:
             if not agent_id or not token:
                 await websocket.send(json.dumps({"status": "error", "message": "agent_id and token required"}))
                 return
+
+            # ── Canal hash redirect ─────────────────────────────────────
+            # If the server has an entry_token configured and this agent's
+            # token doesn't match the derived channel_hash, send an advisory
+            # redirect. The agent may reconnect with the correct token.
+            # The connection is NOT closed — backward compatible with old clients
+            # that don't understand redirects.
+            if self.channel_hash and token != self.channel_hash:
+                await websocket.send(json.dumps({
+                    "type": "channel_redirect",
+                    "token": self.channel_hash,
+                    "entry_token": self.entry_token,
+                }))
+                log.info("🔄 Advisory redirect sent to %s → canal %s (agent used '%s')",
+                         agent_id, self.channel_hash[:12], token[:12])
+                self.flow.record(token, "redirect", source=agent_id,
+                                 payload=f"{self.channel_hash[:12]} (advisory)")
+                # Soft redirect: let the agent continue on its current token
+                # so old clients work. New clients will see the redirect and
+                # reconnect with the correct hashed token.
+                # Fall through to normal registration
 
             # Register on the bus
             result = self.bus.handle_register(token, agent_id, card)
@@ -541,6 +580,15 @@ class HTTPHealthHandler:
                 else:
                     result = {"status": "error", "message": "agent_id and token required"}
 
+            elif path == "/unregister" and method == "POST":
+                agent_id = body.get("agent_id", "")
+                tok = body.get("token", token)
+                if agent_id and tok:
+                    result = bus.handle_unregister(tok, agent_id)
+                    log.info("🗑️ Unregistered %s from network '%s'", agent_id, tok[:12])
+                else:
+                    result = {"status": "error", "message": "agent_id and token required"}
+
             elif path == "/message" and method == "POST":
                 msg = body.get("message", body)
                 tok = body.get("token", token)
@@ -825,6 +873,7 @@ async def main():
     parser.add_argument("--ws-host", default="0.0.0.0", help="WebSocket host")
     parser.add_argument("--ws-port", type=int, default=9876, help="WebSocket port (default: 9876)")
     parser.add_argument("--http-port", type=int, default=9877, help="HTTP health port (default: 9877)")
+    parser.add_argument("--entry-token", default="", help="Entry token for the network — agents that connect with this token get redirected to a stable channel hash. All agents converge on the same channel.")
     args = parser.parse_args()
 
     try:
@@ -836,7 +885,10 @@ async def main():
 
     import sys
 
-    ws_server = WebSocketAgentBusServer(http_port=args.http_port)
+    ws_server = WebSocketAgentBusServer(
+        http_port=args.http_port,
+        entry_token=args.entry_token or None,
+    )
     http_handler = HTTPHealthHandler(ws_server)
 
     http_server = await asyncio.start_server(
