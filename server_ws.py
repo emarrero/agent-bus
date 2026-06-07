@@ -145,6 +145,12 @@ class WebSocketAgentBusServer:
         # Anti-loop: payloads that are just dots/emoji/whitespace are dropped
         self.loop_protection = True
 
+        # Agent-pair rate limiter: {(from, to): [timestamps]}
+        # Prevents rapid back-and-forth loops between the same agents
+        self._pair_traffic: dict[tuple[str, str], list[float]] = {}
+        self._pair_limit = 5          # max messages per window
+        self._pair_window = 30        # seconds
+
         # Canal hash mechanism: entry_token → stable channel hash
         self.entry_token: str | None = None
         self.channel_hash: str | None = None
@@ -297,6 +303,36 @@ class WebSocketAgentBusServer:
                                              payload=repr(payload)[:40],
                                              extra={"reason": "noop"})
                             continue
+                        # ── Agent-pair rate limiter ──────────────────────
+                        target = msg.get("target", "")
+                        if target and self.loop_protection:
+                            pair = (agent_id, target)
+                            now = time.time()
+                            # Prune old entries
+                            self._pair_traffic.setdefault(pair, [])
+                            self._pair_traffic[pair] = [
+                                t for t in self._pair_traffic[pair]
+                                if now - t < self._pair_window
+                            ]
+                            if len(self._pair_traffic[pair]) >= self._pair_limit:
+                                # Too many messages between this pair — drop
+                                await websocket.send(json.dumps({
+                                    "type": "message_ack",
+                                    "message_id": None,
+                                    "dropped": True,
+                                    "reason": f"pair_rate_limit ({self._pair_limit}/{self._pair_window}s)",
+                                }))
+                                self.flow.record(token, "drop", source=agent_id,
+                                                 target=target,
+                                                 payload=repr(payload)[:60],
+                                                 extra={"reason": "pair_rate_limit"})
+                                log.warning(
+                                    "🛑 Pair rate limit: %s→%s (%d msgs in %ds) — dropping",
+                                    agent_id, target,
+                                    len(self._pair_traffic[pair]), self._pair_window,
+                                )
+                                continue
+                            self._pair_traffic[pair].append(now)
                         # ─────────────────────────────────────────────────
                         
                         stored = self.bus.handle_send_message(token, msg)

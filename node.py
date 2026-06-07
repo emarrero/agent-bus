@@ -37,6 +37,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.expanduser("~/.hermes"))
@@ -60,7 +61,18 @@ _DEFAULT_SYSTEM = (
     "Be helpful, direct, and concise. Keep responses under 200 words unless "
     "a longer answer is clearly needed. You can analyze, write, research, "
     "and reason. If asked to do something outside your knowledge cutoff or "
-    "requiring live data, say so clearly."
+    "requiring live data, say so clearly.\n\n"
+    "CRITICAL — ANTI-LOOP RULES:\n"
+    "1. NEVER respond to idle chatter, 'standing by', 'listening', 'ready', "
+    "'understood', 'acknowledged', 'confirmed', or similar status updates "
+    "from other agents. If a message is just a greeting, confirmation, or "
+    "status report, DO NOT REPLY — stay silent.\n"
+    "2. Only respond when a message contains an actual question, task, "
+    "request for information, or a concrete problem to solve.\n"
+    "3. If you receive a broadcast (not directed at you), ignore it unless "
+    "it's asking for help or contains a task.\n"
+    "4. Never send idle messages yourself. Only send messages when you "
+    "have something useful to contribute."
 )
 
 
@@ -223,7 +235,78 @@ def _extract_response(output: str) -> str:
     return response or "…"
 
 
-# ── Message handling ──────────────────────────────────────────────────────────
+# ── Anti-loop dedup ──────────────────────────────────────────────────────────
+# Track recent exchanges to prevent agent-agent reply loops
+_recent_exchanges: dict[str, list[dict]] = {}
+"""source_agent_id → [{"time": float, "payload": str, "response": str}, ...]"""
+
+_LOOP_WINDOW = 60  # seconds
+_LOOP_MAX_PER_WINDOW = 3  # max replies to same source within window
+
+
+def _is_idle_chatter(payload: str) -> bool:
+    """Detect messages that are just idle status updates (not real work)."""
+    text = payload.strip().lower()
+    idle_patterns = [
+        "standing by", "listening", "i'm ready", "ready when", "bus is live",
+        "bus is hot", "tools are warm", "connection solid", "silent and ready",
+        "silent standby", "i'm listening", "drop a task", "send a task",
+        "right back at you", "got it", "roger that", "understood",
+        "acknowledged", "confirmed", "full operational", "actively listening",
+        "fully operational", "say the word", "whenever you need",
+        "i'll pick up", "i'll keep it short", "just say the word",
+        "silent until", "drop something", "waiting for", "standing by for",
+    ]
+    for pattern in idle_patterns:
+        if pattern in text:
+            return True
+    return False
+
+
+def _check_loop(source: str, payload: str) -> bool:
+    """Return True if we should SKIP responding (loop prevention)."""
+    now = time.time()
+    if source not in _recent_exchanges:
+        _recent_exchanges[source] = []
+    
+    # Purge old entries
+    _recent_exchanges[source] = [
+        e for e in _recent_exchanges[source]
+        if now - e["time"] < _LOOP_WINDOW
+    ]
+    
+    # If this is idle chatter, skip entirely
+    if _is_idle_chatter(payload):
+        log.debug("🛑 Loop prevention: idle chatter from %s", source)
+        return True
+    
+    # Rate limit: too many replies to same source in window
+    if len(_recent_exchanges[source]) >= _LOOP_MAX_PER_WINDOW:
+        log.debug("🛑 Loop prevention: rate limit for %s (%d msgs in %ds)",
+                   source, len(_recent_exchanges[source]), _LOOP_WINDOW)
+        return True
+    
+    # Check if payload is too similar to last exchange (repetition loop)
+    if _recent_exchanges[source]:
+        last = _recent_exchanges[source][-1]
+        # Short similar messages = loop
+        if len(payload) < 80 and len(last["payload"]) < 80:
+            if payload.strip().lower() == last["payload"].strip().lower():
+                log.debug("🛑 Loop prevention: repeated payload from %s", source)
+                return True
+    
+    return False
+
+
+def _record_exchange(source: str, payload: str, response: str) -> None:
+    """Record an exchange for loop detection."""
+    if source not in _recent_exchanges:
+        _recent_exchanges[source] = []
+    _recent_exchanges[source].append({
+        "time": time.time(),
+        "payload": payload,
+        "response": response[:80],
+    })
 
 async def handle_event(bus, event: dict, args: argparse.Namespace) -> None:
     etype = event.get("type", "")
@@ -264,6 +347,11 @@ async def handle_message(bus, msg: dict, args: argparse.Namespace) -> None:
 
     log.info("[%s → %s] %s", source, target or "all", payload[:120])
 
+    # ── Anti-loop: skip idle chatter and rate-limit per source ──────
+    if _check_loop(source, payload):
+        return
+    # ─────────────────────────────────────────────────────────────────
+
     # Resume this peer's conversation if memory is enabled
     session_id = _sessions.get(source) if args.memory else None
 
@@ -280,6 +368,7 @@ async def handle_message(bus, msg: dict, args: argparse.Namespace) -> None:
 
     if not args.dry_run:
         await bus.send_message(response, target=source)
+        _record_exchange(source, payload, response)
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
