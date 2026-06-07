@@ -681,6 +681,19 @@ class HTTPHealthHandler:
                 else:
                     result = {"status": "error", "message": "agent_id and token required"}
 
+            elif path == "/purge" and method == "POST":
+                tok = body.get("token", token)
+                if tok:
+                    agents = list(self.ws_server.connections.get(tok, {}).keys())
+                    kicked = 0
+                    for aid in agents:
+                        if await self.ws_server.kick_agent(tok, aid, "purge from monitor"):
+                            kicked += 1
+                    result = {"status": "ok", "kicked": kicked, "agents": agents}
+                    log.info("🧹 Purged %d agent(s) from token '%s'", kicked, tok[:12])
+                else:
+                    result = {"status": "error", "message": "token required"}
+
             elif path == "/task/complete" and method == "POST":
                 task_id = body.get("task_id", "")
                 result_val = body.get("result")
@@ -808,6 +821,7 @@ _MONITOR_HTML = """<!DOCTYPE html>
   <span style="border-left:1px solid #30363d; height:22px"></span>
   <input id="kickId" placeholder="agent to kick" size="12">
   <button id="kick" title="Disconnect agent (it will auto-reconnect)">Kick</button>
+  <button id="purge" title="Disconnect ALL agents and reset the bus" style="background:#da3633;border-color:#da3633;color:#fff">Purge All</button>
   <span class="stat" id="loopwarn" style="color:#ff7b72"></span>
 </header>
 <table>
@@ -895,6 +909,26 @@ document.getElementById('kick').onclick = async () => {
   const d = await r.json();
   document.getElementById('loopwarn').textContent =
     d.kicked ? ('🥾 kicked ' + aid + ' — will reconnect') : ('⚠ ' + (d.message || 'kick failed'));
+};
+
+// purge all agents
+document.getElementById('purge').onclick = async () => {
+  if (!confirm('Purge ALL agents from the bus? They will auto-reconnect.')) return;
+  const tok = document.getElementById('token').value.trim();
+  if (!tok) { alert('Set the token filter first (which network to purge)'); return; }
+  const warn = document.getElementById('loopwarn');
+  warn.textContent = '🔄 Purging all agents...';
+  try {
+    const r = await fetch('/purge', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: tok})
+    });
+    const d = await r.json();
+    warn.textContent = '✅ Purged ' + d.kicked + ' agents — they will reconnect';
+  } catch(e) {
+    warn.textContent = '⚠ Purge failed: ' + e.message;
+  }
 };
 
 function escape(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
