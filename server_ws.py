@@ -465,16 +465,33 @@ class WebSocketAgentBusServer:
             except Exception:
                 pass
 
+    def _resolve_target(self, token: str, target: str) -> str | None:
+        """Resolve a target to an agent_id — supports name aliases."""
+        if not token or not target:
+            return None
+        conns = self.connections.get(token, {})
+        # Direct match (agent_id)
+        if target in conns:
+            return target
+        # Name alias resolution — scan all agents on this token
+        for agent_id in conns:
+            card = self.bus._get_network(token).agents.get(agent_id, {})
+            name = card.get("name", "")
+            if name and name.lower() == target.lower():
+                return agent_id
+        return None
+
     async def _broadcast_to(self, token: str, target: str, data: dict) -> bool:
         """Send a message to a specific agent on the token."""
-        if token in self.connections and target in self.connections[token]:
-            try:
-                await self.connections[token][target].send(
-                    json.dumps(data, ensure_ascii=False)
-                )
-                return True
-            except Exception:
-                pass
+        agent_id = self._resolve_target(token, target)
+        if agent_id:
+            ws = self.connections.get(token, {}).get(agent_id)
+            if ws:
+                try:
+                    await ws.send(json.dumps(data, ensure_ascii=False))
+                    return True
+                except Exception:
+                    pass
         return False
 
     async def kick_agent(self, token: str, agent_id: str, reason: str = "kicked") -> bool:
