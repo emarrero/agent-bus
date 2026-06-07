@@ -142,11 +142,32 @@ class WebSocketAgentBusServer:
 
         self.start_time = time.time()
 
+        # Anti-loop: payloads that are just dots/emoji/whitespace are dropped
+        self.loop_protection = True
+
         # Canal hash mechanism: entry_token → stable channel hash
         self.entry_token: str | None = None
         self.channel_hash: str | None = None
         if entry_token:
             self._set_channel(entry_token)
+
+    @staticmethod
+    def _is_noop_payload(payload: Any) -> bool:
+        """Check if a message payload is just dots/emoji/whitespace (no-op).
+        
+        These are typical loop-spam messages that agents send to each other
+        in infinite reply chains. They are dropped silently to break the loop.
+        """
+        if not payload:
+            return True
+        text = str(payload).strip()
+        if not text:
+            return True
+        # Strip common loop characters
+        stripped = text.replace(".", "").replace(" ", "").replace("\n", "").replace("\r", "")
+        for emoji in ["💛","🖖","❤️","♥","💚","💙","💜","🧡","💕","👍","👋","😊","✅","❌","🔄","👀","💬","🤖"]:
+            stripped = stripped.replace(emoji, "")
+        return len(stripped.strip()) == 0
 
     def _set_channel(self, entry_token: str) -> None:
         """Set the canonical channel for the network.
@@ -261,6 +282,23 @@ class WebSocketAgentBusServer:
                         msg = data.get("message", {})
                         msg.setdefault("source", agent_id)
                         msg.setdefault("type", "text")
+                        
+                        # ── Anti-loop filter ────────────────────────────
+                        payload = msg.get("payload", "")
+                        if self.loop_protection and self._is_noop_payload(payload):
+                            # Drop silently — don't store, don't broadcast
+                            await websocket.send(json.dumps({
+                                "type": "message_ack",
+                                "message_id": None,
+                                "dropped": True,
+                                "reason": "noop",
+                            }))
+                            self.flow.record(token, "drop", source=agent_id,
+                                             payload=repr(payload)[:40],
+                                             extra={"reason": "noop"})
+                            continue
+                        # ─────────────────────────────────────────────────
+                        
                         stored = self.bus.handle_send_message(token, msg)
 
                         target = msg.get("target", "")
@@ -593,7 +631,15 @@ class HTTPHealthHandler:
                 msg = body.get("message", body)
                 tok = body.get("token", token)
                 if tok and msg:
-                    result = bus.handle_send_message(tok, msg)
+                    # ── Anti-loop filter ────────────────────────────────
+                    payload = msg.get("payload", "")
+                    if self.ws_server.loop_protection and self.ws_server._is_noop_payload(payload):
+                        self.ws_server.flow.record(tok, "drop", source=msg.get("source", "http"),
+                                                   payload=repr(payload)[:40],
+                                                   extra={"reason": "noop", "via": "http"})
+                        result = {"status": "ok", "message_id": None, "dropped": True, "reason": "noop"}
+                    else:
+                        result = bus.handle_send_message(tok, msg)
                     target = msg.get("target", "")
                     ws_event = {"type": "new_message", "message": msg}
                     if target:
