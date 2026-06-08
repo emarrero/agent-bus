@@ -1,178 +1,141 @@
-# AgentBus — Red de comunicación multi-agente
+# AgentBus — Multi-Agent Communication Network
 
-**AgentBus** es una red de comunicación en tiempo real para agentes de IA. Permite que múltiples agentes (Hermes, Claude Code, Codex, etc.) se descubran, envíen mensajes, deleguen tareas y compartan información de forma asíncrona, usando un token compartido como clave de red privada.
+**Connect your AI agents (Hermes, Claude Code, Codex, custom bots) into a private real-time mesh.** AgentBus lets agents discover each other, send messages, delegate tasks, and collaborate asynchronously — like a private Slack for your AI workforce.
+
+Inspired by Google's **A2A (Agent-to-Agent)** protocol.
+
+---
+
+**Conecta tus agentes de IA (Hermes, Claude Code, Codex, bots personalizados) en una malla privada en tiempo real.** AgentBus permite que los agentes se descubran, envíen mensajes, deleguen tareas y colaboren de forma asíncrona — como un Slack privado para tu fuerza laboral de IA.
 
 Inspirado en el protocolo **A2A (Agent-to-Agent)** de Google.
 
 ---
 
-## Arquitectura
+## 🌟 Quick Start / Inicio Rápido
 
-```
-┌─────────────────────────────────────────────────┐
-│               AgentBus Server                    │
-│  ┌─────────────┐  ┌─────────────┐              │
-│  │ Red "abc"   │  │ Red "xyz"   │  ← tokens    │
-│  │ (privada)   │  │ (privada)   │    separados  │
-│  └──────┬──────┘  └──────┬──────┘              │
-└─────────┼─────────────────┼─────────────────────┘
-          │                 │
-     ┌────┴────┐       ┌───┴───┐
-     │ Agente A │       │Agente C│  ← WS connect
-     │ token=abc│       │token=xyz
-     └─────────┘       └───────┘
-     ┌─────────┐
-     │ Agente B │
-     │ token=abc│
-     └─────────┘
-```
-
-Cada **token** define una red privada. Agentes con el mismo token se ven y pueden comunicarse. Agentes con tokens diferentes están completamente aislados.
-
-### Componentes
-
-| Componente | Descripción |
-|---|---|
-| **Server HTTP** (`server.py`) | Servidor central HTTP, ideal para polling y entornos simples |
-| **Server WebSocket** (`server_ws.py`) | Servidor con WS + HTTP, mensajes en tiempo real, monitor live |
-| **CLI** (`cli.py`) | Herramienta de línea de comandos para usar la red |
-| **Node** (`node.py`) | Ejecuta Hermes como agente permanente en la red |
-| **Librería Python** (`client.py`, `bus.py`, etc.) | API Python para integrar agentes programáticamente |
-
----
-
-## Requisitos
-
-- **Python 3.10+**
-- `pip` o `uv` para instalar dependencias
-- Opcional: `websockets` (para modo WS y Node)
-
----
-
-## Instalación
-
-### 1. Clonar el repositorio
+### 1. Install / Instalar
 
 ```bash
 git clone https://github.com/emarrero/agent-bus.git
 cd agent-bus
-```
-
-### 2. Instalar dependencias
-
-El paquete se llama `agent_bus`. Puedes instalarlo de varias formas:
-
-#### Opción A: Instalación editable (recomendada para desarrollo)
-
-```bash
 pip install -e .
+pip install websockets   # required for WS mode
 ```
 
-#### Opción B: Con uv (más rápido)
-
-```bash
-uv pip install -e .
-```
-
-#### Opción C: Instalación mínima (solo dependencias del sistema)
-
-```bash
-# El servidor HTTP no requiere dependencias externas
-# Solo usa la biblioteca estándar de Python
-
-# Para el cliente WebSocket necesitas:
-pip install websockets
-
-# O con uv:
-uv pip install websockets
-```
-
-### 3. Verificar la instalación
-
-```bash
-python3 -c "import agent_bus; print(agent_bus.__version__)"
-```
-
-Debería mostrar `0.1.0`.
-
----
-
-## Inicio rápido
-
-### 1. Levantar el servidor
-
-**Opción HTTP** (más simple, sin dependencias extra):
-
-```bash
-python3 server.py --port 9876
-```
-
-**Opción WebSocket** (recomendada — mensajes en tiempo real + monitor web):
+### 2. Start a server / Inicia un servidor
 
 ```bash
 python3 server_ws.py --ws-port 9876 --http-port 9877
 ```
 
-El servidor WebSocket levanta dos puertos:
-- `:9876` — conexiones WebSocket de agentes
-- `:9877` — API HTTP + monitor web en `/monitor`
+The WebSocket server opens two ports:
+- **`:9876`** — agent WebSocket connections
+- **`:9877`** — HTTP API + live monitor at `/monitor`
 
-### 2. Conectar agentes con el CLI
+El servidor WebSocket abre dos puertos:
+- **`:9876`** — conexiones WebSocket de agentes
+- **`:9877`** — API HTTP + monitor en vivo en `/monitor`
 
-Desde otra terminal:
-
-```bash
-# Configurar el token (red privada)
-export AGENT_BUS_TOKEN="mi_red_secreta"
-
-# Registrar un agente
-agent-bus register --name "Investigador" --skills research,analysis
-
-# Enviar un mensaje
-agent-bus send --target escritor --message "Hola, ¿puedes buscar info sobre transformers?"
-
-# Leer mensajes
-agent-bus read
-
-# Listar agentes conectados
-agent-bus peers
-
-# Ver estadísticas del servidor
-agent-bus stats
-```
-
-### 3. Conectar agentes vía WebSocket (Node)
-
-El modo Node ejecuta Hermes como un agente permanente en la red:
+### 3. Connect your Hermes agent / Conecta tu agente Hermes
 
 ```bash
-python3 node.py --token mi_red_secreta \
-  --agent-id investigador \
-  --name "Investigador" \
-  --skills research,analysis,code
+export AGENT_BUS_TOKEN="my_secret_network"
+export AGENT_BUS_SERVER="ws://localhost:9876"
+export AGENT_BUS_AGENT_ID="my-hermes"
+export AGENT_BUS_NAME="My Hermes"
+export AGENT_BUS_SKILLS="assistant,research,code"
+
+python3 node.py
 ```
 
-Cada mensaje que recibe el agente se procesa con Hermes y se responde automáticamente.
+Your Hermes is now **alive on the bus** — it listens for messages and responds autonomously. 🎉
+
+Tu Hermes ya está **vivo en el bus** — escucha mensajes y responde autónomamente.
+
+### 4. Chat from another terminal / Chatea desde otra terminal
+
+```bash
+export AGENT_BUS_TOKEN="my_secret_network"
+export AGENT_BUS_SERVER="ws://localhost:9876"
+
+# Register as a CLI user
+agent-bus register --name "Human Console" --skills terminal
+
+# Send a message to your agent
+agent-bus send --target "my-hermes" --message "Hello! What can you do?"
+```
 
 ---
 
-## Instalación del Servidor (Server)
+## 🧠 How It Works / Cómo Funciona
 
-### Para producción
-
-```bash
-git clone https://github.com/emarrero/agent-bus.git /opt/agent-bus
-cd /opt/agent-bus
-
-# Crear virtualenv
-python3 -m venv venv
-source venv/bin/activate
-pip install websockets  # para modo WS
+```
+┌─────────────────────────────────────────────────┐
+│                    AgentBus                      │
+│  ┌─────────────┐    ┌─────────────┐             │
+│  │ Network A   │    │ Network B   │  ← tokens   │
+│  │ (private)   │    │ (private)   │    isolate   │
+│  └──────┬──────┘    └──────┬──────┘             │
+└─────────┼───────────────────┼────────────────────┘
+          │                   │
+     ┌────┴────┐         ┌───┴───┐
+     │ Agent A │         │Agent C│  ← WebSocket
+     │ token=A │         │token=B
+     └─────────┘         └───────┘
+     ┌─────────┐
+     │ Agent B │
+     │ token=A │
+     └─────────┘
 ```
 
-#### Iniciar con systemd (opcional)
+**Each token defines a private network.** Agents sharing the same token see each other and communicate. Different tokens = complete isolation.
 
-Crea `/etc/systemd/system/agentbus.service`:
+**Cada token define una red privada.** Agentes con el mismo token se ven y se comunican. Tokens diferentes = aislamiento total.
+
+### Agent Identity / Identidad del Agente
+
+Every agent registers with an **AgentCard** — a profile that includes:
+
+| Field / Campo | Description / Descripción |
+|---|---|
+| `agent_id` | Unique ID / ID único |
+| `name` | Human-readable name / Nombre legible |
+| `skills` | Comma-separated abilities / Habilidades separadas por coma |
+| `system` | Optional system prompt / System prompt opcional |
+
+Agents are discoverable by **name alias** too — you can target `Oracle` instead of `hermes-oracle`.
+
+Los agentes se pueden encontrar por **nombre alias** — puedes enviar a `Oracle` en vez de `hermes-oracle`.
+
+---
+
+## 🚀 Server Setup / Configuración del Servidor
+
+### Quick Server (no dependencies)
+
+```bash
+# HTTP-only server — pure stdlib, zero deps
+python3 server.py --port 9876
+```
+
+### Full WebSocket Server (recommended)
+
+```bash
+python3 server_ws.py \
+  --ws-port 9876 \
+  --http-port 9877 \
+  --entry-token "my_canonical_network_token"
+```
+
+| Parameter / Parámetro | Default / Defecto | Purpose / Propósito |
+|---|---|---|
+| `--ws-host` | `0.0.0.0` | WebSocket bind address |
+| `--ws-port` | `9876` | WebSocket port |
+| `--http-port` | `9877` | HTTP API + monitor port |
+| `--entry-token` | *(none)* | Canonical token — agents with wrong tokens get auto-redirected |
+
+### Production with systemd
 
 ```ini
 [Unit]
@@ -192,110 +155,65 @@ Environment=AGENT_BUS_ALLOW_ALL=true
 WantedBy=multi-user.target
 ```
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now agentbus.service
-# Ver logs:
-sudo journalctl -u agentbus.service -f
-```
-
 ---
 
-## Instalación del Cliente (Client)
+## 🔧 CLI Usage / Uso del CLI
 
-Cada máquina que ejecute agentes necesita el cliente.
+```text
+agent-bus register    Register your agent on the network / Registrar agente
+agent-bus send        Send a message / Enviar mensaje
+agent-bus read        Read incoming messages / Leer mensajes
+agent-bus task        Delegate a task / Delegar tarea
+agent-bus claim       Pick the next pending task / Tomar tarea pendiente
+agent-bus complete    Mark task as done / Completar tarea
+agent-bus peers       List connected agents / Listar agentes conectados
+agent-bus listen      Real-time message listener (WS) / Escuchar en tiempo real
+agent-bus health      Health check / Verificar servidor
+agent-bus stats       Server statistics / Estadísticas
+```
 
-### En máquinas remotas
+### Examples / Ejemplos
 
 ```bash
-git clone https://github.com/emarrero/agent-bus.git
-cd agent-bus
-pip install -e .
-pip install websockets  # para modo WS
-```
+# Register with specific skills / Registrar con habilidades
+agent-bus register --name "Translator" --skills translation,writing
 
-### Variables de entorno del cliente
+# Delegate a task / Delegar una tarea
+agent-bus task --target "investigador" --goal "Research transformer models"
 
-| Variable | Descripción | Defecto |
-|---|---|---|
-| `AGENT_BUS_TOKEN` | Token compartido (define la red) | *(requerido)* |
-| `AGENT_BUS_SERVER` | URL del servidor WS | `ws://localhost:9876` |
-| `AGENT_BUS_AGENT_ID` | ID único del agente | hostname |
-| `AGENT_BUS_NAME` | Nombre visible | agent-id |
-| `AGENT_BUS_SKILLS` | Habilidades del agente | `assistant,analysis` |
-| `AGENT_BUS_TOOLS` | Toolsets de Hermes | *(vacío = solo texto)* |
-
----
-
-## Uso del CLI
-
-```
-agent-bus register    Registrar agente en la red
-agent-bus send        Enviar mensaje a otro agente
-agent-bus read        Leer mensajes entrantes
-agent-bus task        Delegar una tarea
-agent-bus claim       Tomar la siguiente tarea pendiente
-agent-bus complete    Completar una tarea
-agent-bus peers       Listar agentes conectados
-agent-bus listen      Escuchar mensajes en tiempo real (WS)
-agent-bus health      Verificar que el servidor responde
-agent-bus stats       Estadísticas del servidor
-```
-
-### Ejemplos
-
-```bash
-# Registrar con habilidades específicas
-agent-bus register --name "Traductor" --skills translation,writing
-
-# Delegar tarea a un agente específico
-agent-bus task --target escritor --goal "Escribe un resumen del proyecto"
-
-# Escuchar mensajes entrantes (modo loop)
+# Listen for messages (loop mode) / Escuchar mensajes
 while true; do
-  mensaje=$(agent-bus listen --timeout 30)
-  echo "Recibido: $mensaje"
-  # procesar...
+  msg=$(agent-bus listen --timeout 30)
+  echo "Received: $msg"
 done
 ```
 
 ---
 
-## Uso como Librería Python
+## 📦 Python Library / Librería Python
+
+### HTTP Client (polling)
 
 ```python
 from agent_bus.client import AgentBusClient
 
-# Conectar a la red
 agent = AgentBusClient(
-    agent_id="mi_agente",
-    token="mi_red_secreta",
+    agent_id="my_agent",
+    token="my_secret_network",
     server_url="http://localhost:9876",
 )
 agent.register(skills=["research", "writing"])
 
-# Enviar mensaje
-agent.send_text("Hola desde Python!", target="otro_agente")
+# Send / Enviar
+agent.send_text("Hello from Python!", target="other_agent")
 
-# Leer mensajes
-mensajes = agent.poll(limit=10)
-for msg in mensajes:
+# Read / Leer
+messages = agent.poll(limit=10)
+for msg in messages:
     print(f"{msg.source}: {msg.payload}")
-
-# Delegar tarea
-task_id = agent.send_task(
-    goal="Investiga qué son los transformers",
-    target="investigador",
-)
-
-# Verificar estado
-status = agent.get_task_status(task_id)
-
-# Cerrar conexión
-agent.shutdown()
 ```
 
-### Modo WebSocket
+### WebSocket Client (real-time)
 
 ```python
 import asyncio
@@ -303,229 +221,181 @@ from agent_bus.hermes_agent import connect_to_bus
 
 async def main():
     bus = await connect_to_bus(
-        agent_id="mi_agente",
-        token="mi_red_secreta",
+        agent_id="my_agent",
+        token="my_secret_network",
         server="ws://localhost:9876",
         skills=["research"],
     )
-
-    # Escuchar mensajes en tiempo real
     async for event in bus.messages():
         if event["type"] == "new_message":
             msg = event["message"]
             print(f"{msg['source']}: {msg['payload']}")
-            # Responder automáticamente
-            await bus.send_message(
-                "Mensaje recibido!", target=msg["source"]
-            )
+            await bus.send_message("Got it!", target=msg["source"])
 
 asyncio.run(main())
 ```
 
 ---
 
-## Monitor Web
+## 🌐 Web Monitor
 
-Cuando usas el servidor WebSocket (`server_ws.py`), el puerto HTTP (`:9877`) incluye:
+When using `server_ws.py`, the HTTP port (`:9877`) serves:
 
-- **`/monitor`** — Dashboard web en tiempo real con el flujo de mensajes
-- **`/flow`** — Historial de eventos (formato JSON)
-- **`/flow/stream`** — SSE (Server-Sent Events) para consumir en vivo
-- **`/health`** — Health check
-- **`/stats`** — Estadísticas del servidor
-
----
-
-## Redes Privadas (Tokens)
-
-El token es el mecanismo de aislamiento. Agentes con el mismo token pertenecen a la misma red privada:
-
-```bash
-# Red "ventas" — solo se ven entre sí
-AGENT_BUS_TOKEN="ventas" agent-bus register --name "Agente Ventas"
-
-# Red "soporte" — red separada, no ve a ventas
-AGENT_BUS_TOKEN="soporte" agent-bus register --name "Agente Soporte"
-```
-
----
-
-## Canal Hash (Convergencia de Red)
-
-Cuando el servidor se inicia con `--entry-token`, define un **canal canónico** al que todos los agentes deben converger. Los agentes que se conectan con un token diferente reciben un mensaje `channel_redirect` con el token correcto.
-
-**Mecanismo:**
-
-1. El servidor se inicia con `--entry-token CANONICAL_TOKEN`
-2. Ese token es el canal canónico de la red
-3. Cuando un agente se conecta con un token **diferente**, el servidor:
-   - Envía un mensaje `channel_redirect` con el token correcto
-   - **No cierra la conexión** — los clientes antiguos siguen funcionando
-4. Los clientes que entienden `channel_redirect` reconectan automáticamente con el token correcto
-5. Todos los agentes convergen en el mismo canal
-
-```bash
-# Servidor con canal canónico
-python3 server_ws.py --entry-token "mi_token_secreto" --ws-port 9876 --http-port 9877
-
-# Los clientes pueden conectarse con cualquier token;
-# el servidor los redirige al canal correcto
-export AGENT_BUS_TOKEN="otro_token"
-python3 node.py --name "Agente Viajero"  # ← recibirá redirect
-```
-
-### Cómo maneja el cliente el redirect
-
-El cliente `HermesBusConnection.connect()` en `hermes_agent.py` detecta el mensaje `channel_redirect` y:
-1. Cierra la conexión actual
-2. Actualiza su token al nuevo canal
-3. Reconecta automáticamente (hasta 3 intentos)
-4. El nodo `node.py` persiste el token actualizado para futuras reconexiones
-
-Esto asegura que **todos los agentes terminen en el mismo canal**, incluso si se configuraron con tokens diferentes.
-
----
-
-## API HTTP (servidor WebSocket)
-
-Endpoint | Método | Descripción
----|---|---|---
-`/register` | POST | Registrar un agente
-`/unregister` | POST | Dar de baja un agente
-`/message` | POST | Enviar mensaje
-`/messages` | GET | Leer mensajes (`?agent_id=ID&limit=N`)
-`/task` | POST | Delegar tarea
-`/task` | GET | Reclamar tarea (`?agent_id=ID`) o consultar (`?task_id=ID`)
-`/task/complete` | POST | Completar tarea
-`/agents` | GET | Listar agentes en la red
-`/kick` | POST | Desconectar un agente forzadamente
-`/health` | GET | Health check
-`/stats` | GET | Estadísticas
-
-Todas las rutas requieren el header `X-Agent-Token: <token>` o parámetro `?token=`.
-
-### Opciones del servidor WebSocket
-
-| Parámetro | Descripción |
+| Endpoint | Description / Descripción |
 |---|---|
-| `--ws-host` | Host para WebSocket (default: `0.0.0.0`) |
-| `--ws-port` | Puerto WebSocket (default: `9876`) |
-| `--http-port` | Puerto HTTP / monitor (default: `9877`) |
-| `--entry-token` | Token canónico para canal hash. Agentes que se conecten con otro token reciben `channel_redirect` |
+| `/monitor` | Real-time dashboard / Dashboard en vivo |
+| `/flow` | Event history (JSON) / Historial de eventos |
+| `/flow/stream` | Server-Sent Events stream / Stream en vivo |
+| `/health` | Health check / Verificación de salud |
+| `/stats` | Server statistics / Estadísticas |
 
 ---
 
-## Protocolo WebSocket
+## 🔐 Networks & Tokens / Redes y Tokens
 
-### Conexión
+The token is your **isolation layer**. Agents with the same token share a private network:
+
+```bash
+# Sales network — agents only see each other
+AGENT_BUS_TOKEN="sales" agent-bus register --name "Sales Agent"
+
+# Support network — completely isolated from sales
+AGENT_BUS_TOKEN="support" agent-bus register --name "Support Agent"
+```
+
+### Channel Hash (Network Convergence)
+
+When running with `--entry-token`, the server defines a **canonical channel**. Agents connecting with a different token receive a `channel_redirect` message pointing them to the correct token — all agents converge on the same channel automatically.
+
+```bash
+# Server with canonical token
+python3 server_ws.py --entry-token "my_canonical_token"
+
+# Client can connect with any token — the server redirects
+export AGENT_BUS_TOKEN="some_other_token"
+python3 node.py  # ← receives redirect automatically
+```
+
+The `HermesBusConnection.connect()` client:
+1. Receives `channel_redirect`
+2. Closes current connection
+3. Updates token
+4. Reconnects (up to 3 retries)
+5. Persists the corrected token for future reconnections
+
+---
+
+## 📋 HTTP API Reference / Referencia API HTTP
+
+| Method / Método | Endpoint | Purpose / Propósito |
+|---|---|---|
+| POST | `/register` | Register an agent / Registrar agente |
+| POST | `/unregister` | Unregister / Dar de baja |
+| POST | `/message` | Send message / Enviar mensaje |
+| GET | `/messages` | Read messages (`?agent_id=ID&limit=N`) |
+| POST | `/task` | Delegate task / Delegar tarea |
+| GET | `/task` | Claim (`?agent_id=ID`) or query (`?task_id=ID`) |
+| POST | `/task/complete` | Complete a task / Completar tarea |
+| GET | `/agents` | List agents / Listar agentes |
+| POST | `/kick` | Force-disconnect an agent / Desconectar forzado |
+| GET | `/health` | Health check |
+| GET | `/stats` | Server statistics |
+
+All endpoints require header `X-Agent-Token: <token>` or query param `?token=`.
+
+---
+
+## 🔌 WebSocket Protocol / Protocolo WebSocket
+
+### Connect / Conectar
 
 ```json
-{"type": "register", "agent_id": "mi_agente", "token": "mi_token", "card": {"name": "Mi Agente", "skills": ["research"]}}
+{"type": "register", "agent_id": "my_agent", "token": "my_token", "card": {"name": "My Agent", "skills": ["research"]}}
 ```
 
-### Mensajes entrantes (del servidor)
+### Server → Agent Events / Eventos del servidor al agente
 
-| Tipo | Descripción |
-|---|---|---|
-| `new_message` | Nuevo mensaje de otro agente |
-| `agent_joined` | Un agente se conectó |
-| `agent_left` | Un agente se desconectó |
-| `agents_list` | Lista actual de agentes |
-| `task_completed` | Una tarea delegada fue completada |
-| `task_ack` | Confirmación de tarea recibida |
-| `message_ack` | Confirmación de mensaje recibido |
-| `channel_redirect` | Redirección al canal canónico (contiene `token` correcto) |
-| `pong` | Respuesta a ping |
-
-### Mensajes salientes (del agente)
-
-| Tipo | Descripción |
+| Type / Tipo | Description / Descripción |
 |---|---|
-| `message` | Enviar mensaje a otro agente |
-| `task` | Delegar tarea |
-| `task_complete` | Marcar tarea como completada |
-| `claim_task` | Reclamar la siguiente tarea pendiente |
-| `ping` | Verificar conexión |
+| `new_message` | New message from another agent |
+| `agent_joined` | An agent connected |
+| `agent_left` | An agent disconnected |
+| `agents_list` | Current agent roster |
+| `task_completed` | Delegated task is done |
+| `task_ack` | Task received confirmation |
+| `message_ack` | Message received confirmation |
+| `channel_redirect` | Canonical channel redirect (includes corrected `token`) |
+| `pong` | Ping response |
+
+### Agent → Server / Agente al servidor
+
+| Type / Tipo | Description / Descripción |
+|---|---|
+| `message` | Send message to another agent |
+| `task` | Delegate a task |
+| `task_complete` | Mark task completed |
+| `claim_task` | Claim next pending task |
+| `ping` | Keepalive |
 
 ---
 
-## Estructura del proyecto
+## 📁 Project Structure / Estructura del Proyecto
 
 ```
 agent-bus/
-├── __init__.py         # Versión y docstring del paquete
-├── __main__.py         # Entry point del paquete
-├── server.py           # Servidor HTTP (std lib, sin dependencias)
-├── server_ws.py        # Servidor WebSocket + HTTP + monitor
-├── client.py           # Cliente Python unificado (HTTP + local)
-├── hermes_agent.py     # Conexión WebSocket para Hermes
-├── node.py             # Ejecuta Hermes como agente permanente
-├── bus.py              # MessageBus con SQLite (modo local)
-├── protocol.py         # Protocolo: AgentCard, Message, Task
-├── router.py           # Enrutamiento inteligente de mensajes
+├── __init__.py         # Package version / Versión del paquete
+├── __main__.py         # Entry point
+├── server.py           # HTTP server (stdlib, no deps)
+├── server_ws.py        # WebSocket + HTTP + monitor server
+├── client.py           # Unified Python client (HTTP + local)
+├── hermes_agent.py     # WebSocket connection for Hermes agents
+├── node.py             # Run Hermes as a permanent agent on the bus
+├── bus.py              # MessageBus with SQLite (local mode)
+├── protocol.py         # Protocol: AgentCard, Message, Task
+├── router.py           # Intelligent message routing
 ├── cli.py              # CLI: register, send, read, task, etc.
-├── multimodal.py       # Capa multimodal (STT/TTS)
-├── .gitignore
-└── README.md           # Este archivo
+├── multimodal.py       # STT/TTS multimodal layer
+├── scripts/            # Utility scripts / Scripts útiles
+└── README.md           # This file / Este archivo
 ```
 
 ---
 
-## Solución de problemas
+## 🧪 Environment Variables / Variables de Entorno
 
-### "ModuleNotFoundError: No module named 'agent_bus'"
-
-Asegúrate de instalar el paquete:
-
-```bash
-pip install -e /ruta/a/agent-bus
-```
-
-O agrega la ruta al PYTHONPATH:
-
-```bash
-export PYTHONPATH="$HOME/agent-bus:$PYTHONPATH"
-```
-
-### "websockets required"
-
-```bash
-pip install websockets
-```
-
-### "Connection refused"
-
-Verifica que el servidor esté corriendo:
-
-```bash
-agent-bus health
-# O con curl:
-curl http://localhost:9877/health
-```
-
-### Los agentes no se ven entre sí
-
-- Verifica que usan el **mismo token**
-- Verifica que apuntan al **mismo servidor**
-- Usa `agent-bus peers` para listar agentes conectados
-
----
-
-## Variables de entorno
-
-| Variable | Usada por | Descripción |
+| Variable | Used By / Usado por | Description / Descripción |
 |---|---|---|
-| `AGENT_BUS_TOKEN` | Todos | Token compartido de red |
-| `AGENT_BUS_SERVER` | Clientes | URL del servidor WS |
-| `AGENT_BUS_AGENT_ID` | Clientes | ID del agente |
-| `AGENT_BUS_NAME` | Node | Nombre visible |
-| `AGENT_BUS_SKILLS` | Node | Habilidades del agente |
-| `AGENT_BUS_TOOLS` | Node | Toolsets de Hermes |
-| `AGENT_BUS_SYSTEM` | Node | System prompt personalizado |
-| `AGENT_BUS_ALLOW_ALL` | Server | Permitir cualquier token |
+| `AGENT_BUS_TOKEN` | All / Todos | Shared network token / Token de red compartido |
+| `AGENT_BUS_SERVER` | Clients | Server WS URL / URL del servidor WS |
+| `AGENT_BUS_AGENT_ID` | Clients | Agent unique ID / ID único del agente |
+| `AGENT_BUS_NAME` | Node | Display name / Nombre visible |
+| `AGENT_BUS_SKILLS` | Node | Comma-separated skills / Habilidades |
+| `AGENT_BUS_TOOLS` | Node | Hermes toolsets |
+| `AGENT_BUS_SYSTEM` | Node | Custom system prompt / System prompt personalizado |
+| `AGENT_BUS_ALLOW_ALL` | Server | Allow any token / Permitir cualquier token |
 
 ---
 
-## Licencia
+## 🐛 Troubleshooting / Solución de Problemas
+
+| Problem / Problema | Fix / Solución |
+|---|---|
+| `ModuleNotFoundError: No module named 'agent_bus'` | `pip install -e .` or `export PYTHONPATH="$HOME/agent-bus:$PYTHONPATH"` |
+| `websockets required` | `pip install websockets` |
+| `Connection refused` | Is the server running? / ¿El servidor está corriendo? `agent-bus health` or `curl http://localhost:9877/health` |
+| Agents can't see each other / No se ven | Check same **token** and same **server** URL / Verifica mismo **token** y misma URL de **servidor**. Use `agent-bus peers` |
+| Messages not reaching agents | Agents are identified by `agent_id` OR by `name` — use `agent-bus peers` to see connected names / Los agentes se identifican por `agent_id` O por `name` |
+
+---
+
+## 📄 License / Licencia
 
 MIT
+
+---
+
+## 🤝 Contributing / Contribuir
+
+PRs welcome! Keep the bilingual spirit — every feature or fix should be documented in English + Spanish.
+
+¡PRs bienvenidos! Mantén el espíritu bilingüe — cada característica o arreglo debe documentarse en inglés + español.
