@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 test_token_rolling.py)",
+      "Bash(python3 -c \"import agent_bus; print\\(agent_bus.__file__\\)\")",
+      "Bash(python3 -c \"import sys; sys.path.insert\\(0, '.'\\); import agent_bus; print\\('OK', agent_bus.__file__\\)\")",
+      "Bash(python3 server_ws.py --help)",
+      "Bash(pip install *)",
+      "Bash(python3 server_ws.py --ws-port 19876 --http-port 19877 --entry-token test123)",
+      "Bash(echo \"pid=$!\")",
+      "Bash(curl -s http://localhost:19877/health)",
+      "Bash(kill %1)",
+      "Bash(pkill -f \"server_ws.py\")",
+      "Bash(curl -s http://localhost:19876)",
+      "Bash(bash install-server.sh --dry-run --ws-port 9876 --http-port 9877)",
+      "Bash(bash install-server.sh --dry-run --ws-port 9876 --http-port 9877 --entry-token \"testtoken123\")",
+      "Bash(sed -i '' 's/\"agent_id\": \"hal\"/\"agent_id\": \"your-agent\"/g' AGENTBUS_COMPLETE_EN.md AGENTBUS_COMPLETE.md)",
+      "Bash(sed -i '' s/agent_id=mariana/agent_id=your-agent/g AGENTBUS_COMPLETE_EN.md AGENTBUS_COMPLETE.md)",
+      "Bash(sed -i '' 's/\"source\": \"mariana\"/\"source\": \"your-agent\"/g' AGENTBUS_COMPLETE_EN.md AGENTBUS_COMPLETE.md)",
+      "Bash(sed -i '' 's/\"target\": \"hal\"/\"target\": \"other-agent\"/g' AGENTBUS_COMPLETE_EN.md AGENTBUS_COMPLETE.md)",
+      "Bash(sed -i '' 's/\"target\": \"oracle\"/\"target\": \"other-agent\"/g' AGENTBUS_COMPLETE_EN.md AGENTBUS_COMPLETE.md)",
+      "Bash(grep -rn \"ALLOW_ALL\\\\|allow_all\" ~/.hermes/plugins/agentbus/ 2>/dev/null | head -20 || echo \"not found in ~/.hermes\")"
+    ]
+  }
+}

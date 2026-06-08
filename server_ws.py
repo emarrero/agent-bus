@@ -177,14 +177,36 @@ class WebSocketAgentBusServer:
 
     def _set_channel(self, entry_token: str) -> None:
         """Set the canonical channel for the network.
-        
-        The entry token IS the canonical channel. Agents that connect
-        with a different token receive an advisory redirect to this one.
-        This ensures all agents converge on the same stable channel.
+
+        Derives an initial channel_hash from the entry_token so that
+        channel_hash != entry_token. Agents connecting with entry_token
+        are redirected to channel_hash, ensuring the entry token acts as
+        a stable "door" while the active channel can be rolled.
         """
         self.entry_token = entry_token
-        self.channel_hash = entry_token
-        log.info("🔐 Canal canónico: %s (entry-token)", entry_token[:16])
+        self.channel_hash = self._derive_hash(entry_token, 0)
+        log.info("🔐 Canal canónico: %s → hash %s…",
+                 entry_token[:16], self.channel_hash[:16])
+
+    def _derive_hash(self, entry_token: str, counter: int) -> str:
+        """Derive a deterministic channel hash from entry_token + counter."""
+        raw = f"{entry_token}:{counter}".encode()
+        return hashlib.sha256(raw).hexdigest()[:32]
+
+    def roll_channel(self) -> str:
+        """Roll to a new channel hash and return it.
+
+        Agents on the old channel should be kicked so they reconnect and
+        get redirected to the new channel_hash automatically.
+        """
+        if not self.entry_token:
+            raise ValueError("No entry_token configured — cannot roll")
+        # Use current time as the counter so each roll is unique
+        self.channel_hash = hashlib.sha256(
+            f"{self.entry_token}:{time.time()}".encode()
+        ).hexdigest()[:32]
+        log.info("🔄 Canal rolled → new hash %s…", self.channel_hash[:16])
+        return self.channel_hash
 
     async def handle_client(self, websocket, path: str = "/"):
         """Handle a WebSocket connection from an agent.
@@ -746,6 +768,31 @@ class HTTPHealthHandler:
                     log.info("🧹 Purged %d agent(s) from token '%s'", kicked, tok[:12])
                 else:
                     result = {"status": "error", "message": "token required"}
+
+            elif path == "/roll" and method == "POST":
+                # Roll the channel: generate a new channel_hash so existing
+                # agents (which get kicked here) and new arrivals with the
+                # original entry_token all converge on the new hash.
+                ws = self.ws_server
+                if not ws.entry_token:
+                    result = {"status": "error", "message": "server has no entry_token configured"}
+                else:
+                    old_hash = ws.channel_hash
+                    new_hash = ws.roll_channel()
+                    # Kick all agents on both the old channel_hash AND entry_token
+                    kicked = 0
+                    for kick_tok in {old_hash, ws.entry_token}:
+                        for aid in list(ws.connections.get(kick_tok, {}).keys()):
+                            if await ws.kick_agent(kick_tok, aid, "channel rolled"):
+                                kicked += 1
+                    log.info("🔄 Rolled: %s… → %s… (kicked %d)",
+                             (old_hash or "")[:12], new_hash[:12], kicked)
+                    result = {
+                        "status": "ok",
+                        "channel_hash": new_hash,
+                        "old_hash": old_hash,
+                        "kicked": kicked,
+                    }
 
             elif path == "/task/complete" and method == "POST":
                 task_id = body.get("task_id", "")
