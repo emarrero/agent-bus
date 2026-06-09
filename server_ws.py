@@ -596,6 +596,8 @@ class HTTPHealthHandler:
             flow = self.ws_server.flow
             bus = self.ws_server.bus
 
+            result = None
+
             # ── Chat UI (root — no token required) ─────────────────────
             if path == "/chat":
                 html = _CHAT_HTML
@@ -704,9 +706,7 @@ class HTTPHealthHandler:
                     writer.close()
                 return
 
-            result = None
-
-            if path == "/flow":
+            elif path == "/flow":
                 kind = qs.get("kind", [None])[0]
                 limit = min(int(qs.get("limit", ["100"])[0]), 1000)
                 events = flow.recent(limit=limit, token=token or None, kind=kind)
