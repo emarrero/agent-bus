@@ -594,6 +594,7 @@ class HTTPHealthHandler:
                         pass
 
             flow = self.ws_server.flow
+            bus = self.ws_server.bus
 
             # ── Chat UI (root — no token required) ─────────────────────
             if path == "/chat":
@@ -703,7 +704,6 @@ class HTTPHealthHandler:
                     writer.close()
                 return
 
-            bus = self.ws_server.bus
             result = None
 
             if path == "/flow":
