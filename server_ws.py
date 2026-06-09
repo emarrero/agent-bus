@@ -595,7 +595,68 @@ class HTTPHealthHandler:
 
             flow = self.ws_server.flow
 
-            # ── Monitor HTML viewer ──────────────────────────────────
+            # ── Chat UI ──────────────────────────────────────────────
+            if path == "/chat":
+                html = _CHAT_HTML
+                resp = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/html; charset=utf-8\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    f"Content-Length: {len(html.encode('utf-8'))}\r\n"
+                    "\r\n"
+                    f"{html}"
+                )
+                writer.write(resp.encode())
+                await writer.drain()
+                return
+
+            if path == "/chat/agents" and token:
+                agents = bus.handle_list_agents(token)
+                result = {"status": "ok", "agents": agents.get("agents", [])}
+
+            elif path == "/chat/history" and token:
+                agent_id = qs.get("agent_id", [None])[0]
+                limit_str = qs.get("limit", ["100"])[0]
+                limit = min(int(limit_str), 500)
+                msgs = bus.handle_get_messages(token, agent_id, None, limit)
+                result = {"status": "ok", "messages": msgs.get("messages", [])}
+
+            elif path == "/chat/send" and method == "POST":
+                tok = body.get("token", token)
+                target = body.get("target", "")
+                payload = body.get("payload", "")
+                msg_type = body.get("type", "text")
+                source = body.get("source", "monitor")
+                if tok and payload:
+                    msg = {
+                        "type": msg_type,
+                        "source": source,
+                        "target": target,
+                        "payload": payload,
+                    }
+                    # Anti-loop filter
+                    if self.ws_server.loop_protection and self.ws_server._is_noop_payload(payload):
+                        self.ws_server.flow.record(tok, "drop", source=source,
+                                                   payload=repr(payload)[:40],
+                                                   extra={"reason": "noop", "via": "chat"})
+                        result = {"status": "ok", "message_id": None, "dropped": True, "reason": "noop"}
+                    else:
+                        result = bus.handle_send_message(tok, msg)
+                        ws_event = {"type": "new_message", "message": msg}
+                        if target:
+                            ok = await self.ws_server._broadcast_to(tok, target, ws_event)
+                            delivered = 1 if ok else 0
+                        else:
+                            await self.ws_server._broadcast(tok, ws_event, exclude=source)
+                            delivered = max(0, len(self.ws_server.connections.get(tok, {})))
+                        self.ws_server.flow.record(tok, "message", source=source,
+                                                   target=target, payload=payload,
+                                                   delivered=delivered,
+                                                   extra={"via": "chat", "msg_type": msg_type})
+                else:
+                    result = {"status": "error", "message": "token and payload required"}
+
+            # ── All other endpoints (must be after /chat which returns) ──
             if path == "/monitor":
                 html = _MONITOR_HTML
                 resp = (
@@ -611,7 +672,7 @@ class HTTPHealthHandler:
                 return
 
             # ── SSE live stream (Wireshark-style tap) ────────────────
-            if path == "/flow/stream":
+            elif path == "/flow/stream":
                 writer.write(
                     "HTTP/1.1 200 OK\r\n"
                     "Content-Type: text/event-stream\r\n"
@@ -850,6 +911,327 @@ class HTTPHealthHandler:
                 pass
         finally:
             writer.close()
+
+
+# ── Chat UI (interactive agent chat) ─────────────────────────────────
+
+_CHAT_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AgentBus Chat</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         background: #0d1117; color: #c9d1d9; height: 100vh; display: flex; flex-direction: column; }
+
+  /* ── Header ── */
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+           background: #161b22; border-bottom: 1px solid #30363d; flex-shrink: 0; }
+  header h1 { font-size: 16px; color: #58a6ff; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: #f85149; transition: background .3s; }
+  #dot.live { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+  header input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+                 border-radius: 6px; padding: 5px 10px; font: inherit; width: 220px; }
+  header .spacer { flex: 1; }
+  .stat { color: #8b949e; font-size: 12px; }
+
+  /* ── Layout ── */
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Sidebar (agents) ── */
+  .sidebar { width: 240px; background: #161b22; border-right: 1px solid #30363d;
+             display: flex; flex-direction: column; flex-shrink: 0; }
+  .sidebar-header { padding: 10px 12px; font-size: 11px; text-transform: uppercase;
+                    letter-spacing: .5px; color: #8b949e; border-bottom: 1px solid #21262d; }
+  .agent-list { flex: 1; overflow-y: auto; }
+  .agent-item { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #21262d;
+                display: flex; align-items: center; gap: 8px; transition: background .15s; }
+  .agent-item:hover { background: #1c2128; }
+  .agent-item.active { background: #1f6feb20; border-left: 2px solid #1f6feb; }
+  .agent-item .dot { width: 7px; height: 7px; border-radius: 50%; background: #3fb950; flex-shrink: 0; }
+  .agent-item .name { font-weight: 600; font-size: 13px; }
+  .agent-item .desc { font-size: 11px; color: #6e7681; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .broadcast-item { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #21262d;
+                    display: flex; align-items: center; gap: 8px; color: #d29922; }
+  .broadcast-item:hover { background: #1c2128; }
+  .broadcast-item.active { background: #d2992220; border-left: 2px solid #d29922; }
+
+  /* ── Chat area ── */
+  .chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .chat-header { padding: 10px 16px; border-bottom: 1px solid #21262d;
+                 display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .chat-header .target-name { font-weight: 600; font-size: 14px; }
+  .chat-header .target-hint { color: #6e7681; font-size: 12px; }
+
+  .messages { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
+  .msg { max-width: 75%; padding: 8px 12px; border-radius: 10px; font-size: 13px;
+         line-height: 1.5; word-break: break-word; white-space: pre-wrap; }
+  .msg.in { align-self: flex-start; background: #1c2128; border: 1px solid #30363d; }
+  .msg.out { align-self: flex-end; background: #1f6feb25; border: 1px solid #1f6feb40; }
+  .msg .meta { font-size: 10px; color: #6e7681; margin-bottom: 3px; }
+  .msg .meta .src { color: #58a6ff; font-weight: 600; }
+  .msg.system { align-self: center; background: transparent; color: #6e7681; font-size: 11px;
+                font-style: italic; padding: 4px 8px; max-width: 90%; text-align: center; }
+
+  /* ── Input ── */
+  .input-area { padding: 10px 16px; border-top: 1px solid #21262d; display: flex;
+                gap: 8px; align-items: flex-end; flex-shrink: 0; }
+  .input-area textarea { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+                         border-radius: 8px; padding: 8px 12px; font: inherit; font-size: 13px;
+                         resize: none; min-height: 38px; max-height: 120px; }
+  .input-area textarea:focus { outline: none; border-color: #1f6feb; }
+  .input-area button { background: #1f6feb; color: #fff; border: none; border-radius: 8px;
+                       padding: 8px 16px; font: inherit; font-size: 13px; cursor: pointer;
+                       white-space: nowrap; }
+  .input-area button:hover { background: #388bfd; }
+  .input-area button:disabled { background: #30363d; color: #6e7681; cursor: default; }
+
+  /* ── Scrollbar ── */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+</style>
+</head>
+<body>
+<header>
+  <div id="dot"></div>
+  <h1>AgentBus Chat</h1>
+  <input id="token" placeholder="network token" size="20">
+  <span class="spacer"></span>
+  <span class="stat" id="connStatus">disconnected</span>
+</header>
+<div class="main">
+  <div class="sidebar">
+    <div class="sidebar-header">Agents</div>
+    <div class="agent-list" id="agentList">
+      <div class="broadcast-item active" data-target="">
+        <span>📢</span><span>Broadcast (all agents)</span>
+      </div>
+    </div>
+  </div>
+  <div class="chat-area">
+    <div class="chat-header">
+      <span class="target-name" id="targetName">Broadcast</span>
+      <span class="target-hint" id="targetHint">— message all agents</span>
+    </div>
+    <div class="messages" id="messages">
+      <div class="msg system">Select an agent to start chatting</div>
+    </div>
+    <div class="input-area">
+      <textarea id="msgInput" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+      <button id="sendBtn" disabled>Send</button>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const tokenEl = $('token');
+const agentList = $('agentList');
+const messagesEl = $('messages');
+const msgInput = $('msgInput');
+const sendBtn = $('sendBtn');
+const targetName = $('targetName');
+const targetHint = $('targetHint');
+const dot = $('dot');
+const connStatus = $('connStatus');
+
+let currentTarget = '';
+let es = null;
+let knownAgents = new Map();
+
+// ── Token management ──
+function getToken() { return tokenEl.value.trim(); }
+
+tokenEl.addEventListener('change', () => {
+  const tok = getToken();
+  if (tok) {
+    loadAgents();
+    loadHistory();
+    connectSSE();
+  }
+});
+
+// ── SSE connection ──
+function connectSSE() {
+  if (es) es.close();
+  const tok = getToken();
+  if (!tok) return;
+  const url = '/flow/stream?token=' + encodeURIComponent(tok);
+  es = new EventSource(url);
+  es.onopen = () => { dot.classList.add('live'); connStatus.textContent = 'connected'; };
+  es.onerror = () => { dot.classList.remove('live'); connStatus.textContent = 'disconnected'; };
+  es.onmessage = ev => {
+    const e = JSON.parse(ev.data);
+    if (e.kind === 'message') handleFlowMessage(e);
+    if (e.kind === 'register') addAgentFromFlow(e);
+    if (e.kind === 'disconnect') removeAgentFromFlow(e);
+  };
+}
+
+function handleFlowMessage(e) {
+  // Show message if it's for our current view
+  const isBroadcast = !currentTarget;
+  const isForUs = isBroadcast
+    ? (!e.target || e.target === '*')
+    : (e.target === currentTarget || e.source === currentTarget);
+  if (isForUs) {
+    const dir = e.source === 'monitor' ? 'out' : 'in';
+    addMessage(e.source, e.payload, e.ts, dir);
+  }
+}
+
+function addAgentFromFlow(e) {
+  if (e.source && !knownAgents.has(e.source)) {
+    knownAgents.set(e.source, { name: e.extra?.name || e.source, description: '' });
+    renderAgents();
+  }
+}
+
+function removeAgentFromFlow(e) {
+  if (e.source && knownAgents.has(e.source)) {
+    knownAgents.delete(e.source);
+    renderAgents();
+  }
+}
+
+// ── Load agents ──
+async function loadAgents() {
+  const tok = getToken();
+  if (!tok) return;
+  try {
+    const r = await fetch('/chat/agents?token=' + encodeURIComponent(tok));
+    const d = await r.json();
+    if (d.status === 'ok') {
+      knownAgents.clear();
+      d.agents.forEach(a => {
+        knownAgents.set(a.agent_id, { name: a.name || a.agent_id, description: a.description || '' });
+      });
+      renderAgents();
+    }
+  } catch(e) { console.error('loadAgents', e); }
+}
+
+function renderAgents() {
+  // Keep broadcast item, rebuild agent list
+  agentList.innerHTML = '<div class="broadcast-item' + (currentTarget === '' ? ' active' : '') + '" data-target="">'
+    + '<span>📢</span><span>Broadcast (all agents)</span></div>';
+  knownAgents.forEach((info, id) => {
+    const div = document.createElement('div');
+    div.className = 'agent-item' + (currentTarget === id ? ' active' : '');
+    div.dataset.target = id;
+    div.innerHTML = '<div class="dot"></div><div><div class="name">' + esc(info.name) + '</div>'
+      + '<div class="desc">' + esc(info.description || id) + '</div></div>';
+    div.onclick = () => selectTarget(id);
+    agentList.appendChild(div);
+  });
+}
+
+function selectTarget(id) {
+  currentTarget = id;
+  const info = knownAgents.get(id);
+  targetName.textContent = id === '' ? 'Broadcast' : (info?.name || id);
+  targetHint.textContent = id === '' ? '— message all agents' : '— direct message to ' + id;
+  renderAgents();
+  loadHistory();
+  // Clear and show system message
+  messagesEl.innerHTML = '<div class="msg system">Chatting with ' + (id === '' ? 'all agents' : (info?.name || id)) + '</div>';
+}
+
+// ── Load history ──
+async function loadHistory() {
+  const tok = getToken();
+  if (!tok) return;
+  const params = new URLSearchParams({ token: tok, limit: '100' });
+  if (currentTarget) params.set('agent_id', currentTarget);
+  try {
+    const r = await fetch('/chat/history?' + params);
+    const d = await r.json();
+    if (d.status === 'ok') {
+      messagesEl.innerHTML = '';
+      if (d.messages.length === 0) {
+        messagesEl.innerHTML = '<div class="msg system">No messages yet. Say hello!</div>';
+      } else {
+        d.messages.forEach(m => {
+          const dir = m.source === 'monitor' ? 'out' : 'in';
+          addMessage(m.source, m.payload, m.timestamp, dir, false);
+        });
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+  } catch(e) { console.error('loadHistory', e); }
+}
+
+// ── Send message ──
+async function sendMessage() {
+  const tok = getToken();
+  const text = msgInput.value.trim();
+  if (!tok || !text) return;
+  sendBtn.disabled = true;
+  try {
+    const r = await fetch('/chat/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tok, target: currentTarget, payload: text, source: 'monitor' })
+    });
+    const d = await r.json();
+    if (d.dropped) {
+      addMessage('system', '⚠ message dropped: ' + d.reason, null, 'system');
+    } else {
+      msgInput.value = '';
+      msgInput.style.height = 'auto';
+      // Optimistically show our message
+      addMessage('monitor', text, new Date().toISOString(), 'out');
+    }
+  } catch(e) {
+    addMessage('system', '⚠ send failed: ' + e.message, null, 'system');
+  } finally {
+    sendBtn.disabled = false;
+    msgInput.focus();
+  }
+}
+
+sendBtn.onclick = sendMessage;
+msgInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+msgInput.addEventListener('input', () => {
+  sendBtn.disabled = !msgInput.value.trim() || !getToken();
+  msgInput.style.height = 'auto';
+  msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
+});
+
+// ── Message rendering ──
+function addMessage(source, payload, ts, dir, scroll = true) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + dir;
+  const time = ts ? new Date(ts).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+  const srcLabel = dir === 'out' ? 'you' : esc(source);
+  div.innerHTML = '<div class="meta"><span class="src">' + srcLabel + '</span>'
+    + (time ? ' <span style="color:#6e7681">' + time + '</span>' : '') + '</div>'
+    + esc(String(payload ?? ''));
+  messagesEl.appendChild(div);
+  if (scroll) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+  // Cap messages
+  while (messagesEl.children.length > 300) messagesEl.removeChild(messagesEl.firstChild);
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// ── Auto-refresh agents ──
+setInterval(() => { if (getToken()) loadAgents(); }, 10000);
+
+// ── Init ──
+if (getToken()) {
+  loadAgents();
+  connectSSE();
+}
+</script>
+</body>
+</html>"""
 
 
 # ── Monitor HTML (live message-flow viewer, Wireshark-style) ─────────
