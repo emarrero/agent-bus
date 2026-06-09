@@ -595,7 +595,7 @@ class HTTPHealthHandler:
 
             flow = self.ws_server.flow
 
-            # ── Chat UI ──────────────────────────────────────────────
+            # ── Chat UI (root — no token required) ─────────────────────
             if path == "/chat":
                 html = _CHAT_HTML
                 resp = (
@@ -610,19 +610,19 @@ class HTTPHealthHandler:
                 await writer.drain()
                 return
 
-            if path == "/chat/agents" and token:
-                agents = bus.handle_list_agents(token)
-                result = {"status": "ok", "agents": agents.get("agents", [])}
+            if path == "/chat/agents":
+                # Root: list ALL agents across ALL networks
+                result = bus.handle_list_all_agents()
 
-            elif path == "/chat/history" and token:
+            elif path == "/chat/history":
                 agent_id = qs.get("agent_id", [None])[0]
+                tok = qs.get("token", [None])[0]
                 limit_str = qs.get("limit", ["100"])[0]
                 limit = min(int(limit_str), 500)
-                msgs = bus.handle_get_messages(token, agent_id, None, limit)
-                result = {"status": "ok", "messages": msgs.get("messages", [])}
+                result = bus.handle_get_all_messages(agent_id=agent_id, token=tok, limit=limit)
 
             elif path == "/chat/send" and method == "POST":
-                tok = body.get("token", token)
+                tok = body.get("token", "")
                 target = body.get("target", "")
                 payload = body.get("payload", "")
                 msg_type = body.get("type", "text")
@@ -634,7 +634,6 @@ class HTTPHealthHandler:
                         "target": target,
                         "payload": payload,
                     }
-                    # Anti-loop filter
                     if self.ws_server.loop_protection and self.ws_server._is_noop_payload(payload):
                         self.ws_server.flow.record(tok, "drop", source=source,
                                                    payload=repr(payload)[:40],
@@ -926,33 +925,42 @@ _CHAT_HTML = """<!DOCTYPE html>
   body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
          background: #0d1117; color: #c9d1d9; height: 100vh; display: flex; flex-direction: column; }
 
-  /* ── Header ── */
   header { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
            background: #161b22; border-bottom: 1px solid #30363d; flex-shrink: 0; }
   header h1 { font-size: 16px; color: #58a6ff; }
   #dot { width: 9px; height: 9px; border-radius: 50%; background: #f85149; transition: background .3s; }
   #dot.live { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
-  header input { background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
-                 border-radius: 6px; padding: 5px 10px; font: inherit; width: 220px; }
   header .spacer { flex: 1; }
   .stat { color: #8b949e; font-size: 12px; }
 
-  /* ── Layout ── */
   .main { display: flex; flex: 1; overflow: hidden; }
 
-  /* ── Sidebar (agents) ── */
-  .sidebar { width: 240px; background: #161b22; border-right: 1px solid #30363d;
+  /* ── Sidebar ── */
+  .sidebar { width: 260px; background: #161b22; border-right: 1px solid #30363d;
              display: flex; flex-direction: column; flex-shrink: 0; }
   .sidebar-header { padding: 10px 12px; font-size: 11px; text-transform: uppercase;
                     letter-spacing: .5px; color: #8b949e; border-bottom: 1px solid #21262d; }
   .agent-list { flex: 1; overflow-y: auto; }
-  .agent-item { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #21262d;
+
+  .network-group { border-bottom: 1px solid #21262d; }
+  .network-label { padding: 6px 12px; font-size: 10px; text-transform: uppercase;
+                   letter-spacing: .5px; color: #6e7681; background: #0d1117;
+                   display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .network-label:hover { color: #c9d1d9; }
+  .network-label .arrow { font-size: 9px; transition: transform .2s; }
+  .network-label.collapsed .arrow { transform: rotate(-90deg); }
+  .network-label .bcast { color: #d29922; }
+  .network-agents { overflow: hidden; }
+  .network-label.collapsed + .network-agents { display: none; }
+
+  .agent-item { padding: 7px 12px 7px 28px; cursor: pointer;
                 display: flex; align-items: center; gap: 8px; transition: background .15s; }
   .agent-item:hover { background: #1c2128; }
-  .agent-item.active { background: #1f6feb20; border-left: 2px solid #1f6feb; }
+  .agent-item.active { background: #1f6feb20; border-left: 2px solid #1f6feb; padding-left: 26px; }
   .agent-item .dot { width: 7px; height: 7px; border-radius: 50%; background: #3fb950; flex-shrink: 0; }
-  .agent-item .name { font-weight: 600; font-size: 13px; }
-  .agent-item .desc { font-size: 11px; color: #6e7681; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-item .name { font-weight: 600; font-size: 12px; }
+  .agent-item .desc { font-size: 10px; color: #6e7681; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
   .broadcast-item { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #21262d;
                     display: flex; align-items: center; gap: 8px; color: #d29922; }
   .broadcast-item:hover { background: #1c2128; }
@@ -972,10 +980,10 @@ _CHAT_HTML = """<!DOCTYPE html>
   .msg.out { align-self: flex-end; background: #1f6feb25; border: 1px solid #1f6feb40; }
   .msg .meta { font-size: 10px; color: #6e7681; margin-bottom: 3px; }
   .msg .meta .src { color: #58a6ff; font-weight: 600; }
+  .msg .meta .tok { color: #6e7681; font-size: 9px; }
   .msg.system { align-self: center; background: transparent; color: #6e7681; font-size: 11px;
                 font-style: italic; padding: 4px 8px; max-width: 90%; text-align: center; }
 
-  /* ── Input ── */
   .input-area { padding: 10px 16px; border-top: 1px solid #21262d; display: flex;
                 gap: 8px; align-items: flex-end; flex-shrink: 0; }
   .input-area textarea { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
@@ -988,7 +996,6 @@ _CHAT_HTML = """<!DOCTYPE html>
   .input-area button:hover { background: #388bfd; }
   .input-area button:disabled { background: #30363d; color: #6e7681; cursor: default; }
 
-  /* ── Scrollbar ── */
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
@@ -998,26 +1005,25 @@ _CHAT_HTML = """<!DOCTYPE html>
 <header>
   <div id="dot"></div>
   <h1>AgentBus Chat</h1>
-  <input id="token" placeholder="network token" size="20">
   <span class="spacer"></span>
   <span class="stat" id="connStatus">disconnected</span>
 </header>
 <div class="main">
   <div class="sidebar">
-    <div class="sidebar-header">Agents</div>
+    <div class="sidebar-header">All Networks</div>
     <div class="agent-list" id="agentList">
-      <div class="broadcast-item active" data-target="">
-        <span>📢</span><span>Broadcast (all agents)</span>
+      <div class="broadcast-item active" data-token="" data-target="">
+        <span>📢</span><span>Broadcast (all networks)</span>
       </div>
     </div>
   </div>
   <div class="chat-area">
     <div class="chat-header">
       <span class="target-name" id="targetName">Broadcast</span>
-      <span class="target-hint" id="targetHint">— message all agents</span>
+      <span class="target-hint" id="targetHint">— all networks</span>
     </div>
     <div class="messages" id="messages">
-      <div class="msg system">Select an agent to start chatting</div>
+      <div class="msg system">Select an agent or network to start chatting</div>
     </div>
     <div class="input-area">
       <textarea id="msgInput" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
@@ -1027,7 +1033,6 @@ _CHAT_HTML = """<!DOCTYPE html>
 </div>
 <script>
 const $ = id => document.getElementById(id);
-const tokenEl = $('token');
 const agentList = $('agentList');
 const messagesEl = $('messages');
 const msgInput = $('msgInput');
@@ -1037,113 +1042,124 @@ const targetHint = $('targetHint');
 const dot = $('dot');
 const connStatus = $('connStatus');
 
-let currentTarget = '';
+let currentToken = '';   // which network token
+let currentTarget = '';  // which agent (empty = broadcast)
 let es = null;
-let knownAgents = new Map();
 
-// ── Token management ──
-function getToken() { return tokenEl.value.trim(); }
-
-tokenEl.addEventListener('change', () => {
-  const tok = getToken();
-  if (tok) {
-    loadAgents();
-    loadHistory();
-    connectSSE();
-  }
-});
-
-// ── SSE connection ──
+// ── SSE (global — no token filter) ──
 function connectSSE() {
   if (es) es.close();
-  const tok = getToken();
-  if (!tok) return;
-  const url = '/flow/stream?token=' + encodeURIComponent(tok);
-  es = new EventSource(url);
+  es = new EventSource('/flow/stream');
   es.onopen = () => { dot.classList.add('live'); connStatus.textContent = 'connected'; };
   es.onerror = () => { dot.classList.remove('live'); connStatus.textContent = 'disconnected'; };
   es.onmessage = ev => {
     const e = JSON.parse(ev.data);
     if (e.kind === 'message') handleFlowMessage(e);
-    if (e.kind === 'register') addAgentFromFlow(e);
-    if (e.kind === 'disconnect') removeAgentFromFlow(e);
+    if (e.kind === 'register') handleRegister(e);
+    if (e.kind === 'disconnect') handleDisconnect(e);
   };
 }
 
 function handleFlowMessage(e) {
-  // Show message if it's for our current view
-  const isBroadcast = !currentTarget;
-  const isForUs = isBroadcast
-    ? (!e.target || e.target === '*')
-    : (e.target === currentTarget || e.source === currentTarget);
-  if (isForUs) {
+  const isBroadcast = !currentToken && !currentTarget;
+  const matchesNetwork = !currentToken || e.token === currentToken;
+  const matchesAgent = !currentTarget || e.target === currentTarget || e.source === currentTarget;
+  if (isBroadcast || (matchesNetwork && matchesAgent)) {
     const dir = e.source === 'monitor' ? 'out' : 'in';
-    addMessage(e.source, e.payload, e.ts, dir);
+    addMessage(e.source, e.payload, e.ts, dir, e.token);
   }
 }
 
-function addAgentFromFlow(e) {
-  if (e.source && !knownAgents.has(e.source)) {
-    knownAgents.set(e.source, { name: e.extra?.name || e.source, description: '' });
-    renderAgents();
-  }
+function handleRegister(e) {
+  loadAgents();
 }
 
-function removeAgentFromFlow(e) {
-  if (e.source && knownAgents.has(e.source)) {
-    knownAgents.delete(e.source);
-    renderAgents();
-  }
+function handleDisconnect(e) {
+  loadAgents();
 }
 
-// ── Load agents ──
+// ── Load all agents (root) ──
 async function loadAgents() {
-  const tok = getToken();
-  if (!tok) return;
   try {
-    const r = await fetch('/chat/agents?token=' + encodeURIComponent(tok));
+    const r = await fetch('/chat/agents');
     const d = await r.json();
-    if (d.status === 'ok') {
-      knownAgents.clear();
-      d.agents.forEach(a => {
-        knownAgents.set(a.agent_id, { name: a.name || a.agent_id, description: a.description || '' });
-      });
-      renderAgents();
-    }
+    if (d.status === 'ok') renderAgents(d.agents);
   } catch(e) { console.error('loadAgents', e); }
 }
 
-function renderAgents() {
-  // Keep broadcast item, rebuild agent list
-  agentList.innerHTML = '<div class="broadcast-item' + (currentTarget === '' ? ' active' : '') + '" data-target="">'
-    + '<span>📢</span><span>Broadcast (all agents)</span></div>';
-  knownAgents.forEach((info, id) => {
-    const div = document.createElement('div');
-    div.className = 'agent-item' + (currentTarget === id ? ' active' : '');
-    div.dataset.target = id;
-    div.innerHTML = '<div class="dot"></div><div><div class="name">' + esc(info.name) + '</div>'
-      + '<div class="desc">' + esc(info.description || id) + '</div></div>';
-    div.onclick = () => selectTarget(id);
-    agentList.appendChild(div);
+function renderAgents(agents) {
+  // Group agents by token
+  const groups = {};
+  agents.forEach(a => {
+    const tok = a._token || 'unknown';
+    if (!groups[tok]) groups[tok] = [];
+    groups[tok].push(a);
+  });
+
+  let html = '<div class="broadcast-item' + (!currentToken && !currentTarget ? ' active' : '') + '" data-token="" data-target="">'
+    + '<span>📢</span><span>Broadcast (all networks)</span></div>';
+
+  Object.entries(groups).forEach(([tok, agts]) => {
+    const shortTok = tok.length > 16 ? tok.slice(0, 8) + '…' + tok.slice(-6) : tok;
+    const isNetActive = currentToken === tok && !currentTarget;
+    html += '<div class="network-group">';
+    html += '<div class="network-label' + (isNetActive ? ' active' : '') + '" data-token="' + esc(tok) + '" data-target="">'
+      + '<span class="arrow">▼</span><span class="bcast">📡</span><span>' + esc(shortTok) + '</span>'
+      + '<span style="margin-left:auto;font-size:10px;color:#6e7681">' + agts.length + '</span></div>';
+    html += '<div class="network-agents">';
+    agts.forEach(a => {
+      const isActive = currentToken === tok && currentTarget === a.agent_id;
+      html += '<div class="agent-item' + (isActive ? ' active' : '') + '" data-token="' + esc(tok) + '" data-target="' + esc(a.agent_id) + '">'
+        + '<div class="dot"></div><div><div class="name">' + esc(a.name || a.agent_id) + '</div>'
+        + '<div class="desc">' + esc(a.description || a.agent_id) + '</div></div></div>';
+    });
+    html += '</div></div>';
+  });
+
+  agentList.innerHTML = html;
+
+  // Attach click handlers
+  agentList.querySelectorAll('.network-label').forEach(el => {
+    el.onclick = () => selectTarget(el.dataset.token, '');
+  });
+  agentList.querySelectorAll('.agent-item').forEach(el => {
+    el.onclick = () => selectTarget(el.dataset.token, el.dataset.target);
+  });
+  agentList.querySelectorAll('.broadcast-item').forEach(el => {
+    el.onclick = () => selectTarget('', '');
   });
 }
 
-function selectTarget(id) {
-  currentTarget = id;
-  const info = knownAgents.get(id);
-  targetName.textContent = id === '' ? 'Broadcast' : (info?.name || id);
-  targetHint.textContent = id === '' ? '— message all agents' : '— direct message to ' + id;
-  renderAgents();
+function selectTarget(token, agentId) {
+  currentToken = token;
+  currentTarget = agentId;
+
+  if (!token && !agentId) {
+    targetName.textContent = 'Broadcast';
+    targetHint.textContent = '— all networks';
+  } else if (token && !agentId) {
+    targetName.textContent = 'Network: ' + (token.length > 20 ? token.slice(0, 10) + '…' + token.slice(-8) : token);
+    targetHint.textContent = '— broadcast to all agents on this network';
+  } else {
+    targetName.textContent = agentId;
+    targetHint.textContent = '— DM on network ' + (token.length > 20 ? token.slice(0, 8) + '…' : token);
+  }
+
+  renderAgentsFromCache();
   loadHistory();
-  // Clear and show system message
-  messagesEl.innerHTML = '<div class="msg system">Chatting with ' + (id === '' ? 'all agents' : (info?.name || id)) + '</div>';
+  messagesEl.innerHTML = '<div class="msg system">Chatting with ' + esc(targetName.textContent) + '</div>';
+}
+
+let cachedAgents = [];
+function renderAgentsFromCache() {
+  // Re-render with current selection from cached data
+  if (cachedAgents.length) renderAgents(cachedAgents);
 }
 
 // ── Load history ──
 async function loadHistory() {
-  const tok = getToken();
-  if (!tok) return;
-  const params = new URLSearchParams({ token: tok, limit: '100' });
+  const params = new URLSearchParams({ limit: '100' });
+  if (currentToken) params.set('token', currentToken);
   if (currentTarget) params.set('agent_id', currentTarget);
   try {
     const r = await fetch('/chat/history?' + params);
@@ -1155,7 +1171,7 @@ async function loadHistory() {
       } else {
         d.messages.forEach(m => {
           const dir = m.source === 'monitor' ? 'out' : 'in';
-          addMessage(m.source, m.payload, m.timestamp, dir, false);
+          addMessage(m.source, m.payload, m.timestamp, dir, m._token, false);
         });
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -1163,17 +1179,20 @@ async function loadHistory() {
   } catch(e) { console.error('loadHistory', e); }
 }
 
-// ── Send message ──
+// ── Send ──
 async function sendMessage() {
-  const tok = getToken();
   const text = msgInput.value.trim();
-  if (!tok || !text) return;
+  if (!text) return;
+  if (!currentToken && !currentTarget) {
+    addMessage('system', '⚠ Select a network or agent first', null, 'system');
+    return;
+  }
   sendBtn.disabled = true;
   try {
     const r = await fetch('/chat/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: tok, target: currentTarget, payload: text, source: 'monitor' })
+      body: JSON.stringify({ token: currentToken, target: currentTarget, payload: text, source: 'monitor' })
     });
     const d = await r.json();
     if (d.dropped) {
@@ -1181,8 +1200,7 @@ async function sendMessage() {
     } else {
       msgInput.value = '';
       msgInput.style.height = 'auto';
-      // Optimistically show our message
-      addMessage('monitor', text, new Date().toISOString(), 'out');
+      addMessage('monitor', text, new Date().toISOString(), 'out', currentToken);
     }
   } catch(e) {
     addMessage('system', '⚠ send failed: ' + e.message, null, 'system');
@@ -1197,38 +1215,33 @@ msgInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
 msgInput.addEventListener('input', () => {
-  sendBtn.disabled = !msgInput.value.trim() || !getToken();
+  sendBtn.disabled = !msgInput.value.trim();
   msgInput.style.height = 'auto';
   msgInput.style.height = Math.min(msgInput.scrollHeight, 120) + 'px';
 });
 
-// ── Message rendering ──
-function addMessage(source, payload, ts, dir, scroll = true) {
+// ── Render message ──
+function addMessage(source, payload, ts, dir, token, scroll = true) {
   const div = document.createElement('div');
   div.className = 'msg ' + dir;
   const time = ts ? new Date(ts).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
   const srcLabel = dir === 'out' ? 'you' : esc(source);
+  const tokLabel = token && dir === 'in' ? ' <span class="tok">[' + esc(token.slice(0, 8)) + '…]</span>' : '';
   div.innerHTML = '<div class="meta"><span class="src">' + srcLabel + '</span>'
+    + tokLabel
     + (time ? ' <span style="color:#6e7681">' + time + '</span>' : '') + '</div>'
     + esc(String(payload ?? ''));
   messagesEl.appendChild(div);
-  if (scroll) {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
-  // Cap messages
+  if (scroll) messagesEl.scrollTop = messagesEl.scrollHeight;
   while (messagesEl.children.length > 300) messagesEl.removeChild(messagesEl.firstChild);
 }
 
 function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
-// ── Auto-refresh agents ──
-setInterval(() => { if (getToken()) loadAgents(); }, 10000);
-
 // ── Init ──
-if (getToken()) {
-  loadAgents();
-  connectSSE();
-}
+loadAgents();
+connectSSE();
+setInterval(loadAgents, 10000);
 </script>
 </body>
 </html>"""

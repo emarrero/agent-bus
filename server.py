@@ -222,6 +222,29 @@ class AgentBusServer:
             "server_uptime": int(time.time() - self.start_time),
         }
 
+    def handle_list_all_agents(self) -> dict:
+        """List ALL agents across ALL networks (root/monitor view)."""
+        all_agents = []
+        for tok, network in self.networks.items():
+            for agent in network.get_agents():
+                agent["_token"] = tok
+                all_agents.append(agent)
+        return {"status": "ok", "agents": all_agents, "count": len(all_agents)}
+
+    def handle_get_all_messages(self, agent_id: str | None = None,
+                                 token: str | None = None,
+                                 limit: int = 100) -> dict:
+        """Get messages across all networks, or filtered by agent_id / token."""
+        all_msgs = []
+        networks = [self.networks[token]] if token and token in self.networks else self.networks.values()
+        for network in networks:
+            msgs = network.get_messages(agent_id=agent_id, limit=limit)
+            for m in msgs:
+                m["_token"] = network.token
+            all_msgs.extend(msgs)
+        all_msgs.sort(key=lambda m: m.get("timestamp", ""))
+        return {"status": "ok", "messages": all_msgs[-limit:], "count": len(all_msgs)}
+
 
 # ── HTTP Handler ─────────────────────────────────────────────────────
 
