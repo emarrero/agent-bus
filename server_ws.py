@@ -378,7 +378,8 @@ class WebSocketAgentBusServer:
                         self.flow.record(token, "message", source=agent_id,
                                          target=target, payload=msg.get("payload"),
                                          delivered=delivered,
-                                         extra={"msg_type": msg.get("type", "text"), "ip": client_ip})
+                                         extra={"msg_type": msg.get("type", "text"), "ip": client_ip,
+                                                "message_id": stored.get("message_id", "")})
 
                         # Acknowledge to sender
                         await websocket.send(json.dumps({
@@ -630,6 +631,8 @@ class HTTPHealthHandler:
                 payload = body.get("payload", "")
                 msg_type = body.get("type", "text")
                 source = body.get("source", "monitor")
+                reply_to = body.get("reply_to", "")
+                conversation_id = body.get("conversation_id", "")
                 if tok and payload:
                     msg = {
                         "type": msg_type,
@@ -637,6 +640,10 @@ class HTTPHealthHandler:
                         "target": target,
                         "payload": payload,
                     }
+                    if reply_to:
+                        msg["reply_to"] = reply_to
+                    if conversation_id:
+                        msg["conversation_id"] = conversation_id
                     if self.ws_server.loop_protection and self.ws_server._is_noop_payload(payload):
                         self.ws_server.flow.record(tok, "drop", source=source,
                                                    payload=repr(payload)[:40],
@@ -654,7 +661,10 @@ class HTTPHealthHandler:
                         self.ws_server.flow.record(tok, "message", source=source,
                                                    target=target, payload=payload,
                                                    delivered=delivered,
-                                                   extra={"via": "chat", "msg_type": msg_type})
+                                                   extra={"via": "chat", "msg_type": msg_type,
+                                                          "message_id": result.get("message_id", "")})
+                    # Return the message_id so the UI can track reply_to for next message
+                    result["message_id"] = result.get("message_id", "")
                 else:
                     result = {"status": "error", "message": "token and payload required"}
 
@@ -1044,6 +1054,9 @@ const connStatus = $('connStatus');
 
 let currentToken = '';   // which network token
 let currentTarget = '';  // which agent (empty = broadcast)
+let conversationId = '';  // UUID for this chat session
+let lastSentId = '';      // message_id of last message we sent
+let lastReplyId = '';     // message_id of last agent reply (for reply_to)
 let es = null;
 
 // ── SSE (global — no token filter) ──
@@ -1065,6 +1078,14 @@ function handleFlowMessage(e) {
   if (currentTarget) {
     // DM view: show messages to/from this agent
     if (e.source !== currentTarget && e.target !== currentTarget) return;
+    // Track message_ids for reply_to chaining
+    const mid = e.extra?.message_id || '';
+    if (e.source === currentTarget && mid) {
+      lastReplyId = mid;
+    }
+    if (e.source === 'monitor' && mid) {
+      lastSentId = mid;
+    }
   }
   // If broadcast view (no target selected), show everything
   const dir = e.source === 'monitor' ? 'out' : 'in';
@@ -1134,6 +1155,10 @@ function renderAgents(agents) {
 function selectTarget(token, agentId) {
   currentToken = token;
   currentTarget = agentId;
+  // New conversation thread — generate ID and reset reply chain
+  conversationId = 'chat-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  lastSentId = '';
+  lastReplyId = '';
 
   if (!token && !agentId) {
     targetName.textContent = 'Broadcast';
@@ -1190,15 +1215,19 @@ async function sendMessage() {
   }
   sendBtn.disabled = true;
   try {
+    const body = { token: currentToken, target: currentTarget, payload: text, source: 'monitor' };
+    if (lastReplyId) body.reply_to = lastReplyId;
+    if (conversationId) body.conversation_id = conversationId;
     const r = await fetch('/chat/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: currentToken, target: currentTarget, payload: text, source: 'monitor' })
+      body: JSON.stringify(body)
     });
     const d = await r.json();
     if (d.dropped) {
       addMessage('system', '⚠ message dropped: ' + d.reason, null, 'system');
     } else {
+      lastSentId = d.message_id || '';
       msgInput.value = '';
       msgInput.style.height = 'auto';
       addMessage('monitor', text, new Date().toISOString(), 'out', currentToken);
