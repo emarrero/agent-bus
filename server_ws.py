@@ -127,7 +127,8 @@ class WebSocketAgentBusServer:
     in real time by channel (token).
     """
 
-    def __init__(self, http_port: int = 9877, entry_token: str | None = None):
+    def __init__(self, http_port: int = 9877, entry_token: str | None = None,
+                 rolling_channel: bool = False):
         self.bus = AgentBusServer()
         self.http_port = http_port
 
@@ -151,10 +152,20 @@ class WebSocketAgentBusServer:
         self._pair_limit = 5          # max messages per window
         self._pair_window = 30        # seconds
 
-        # Canal hash mechanism: entry_token → stable channel hash
-        self.entry_token: str | None = None
+        # Content-based loop detection: {(token, source, target): [(ts, hash)]}
+        # Drops near-duplicate payloads in a short window — catches reply
+        # loops where agents echo each other with slight variations.
+        self._recent_msgs: dict[tuple[str, str, str], list[tuple[float, str]]] = {}
+        self._dup_window = 20.0       # seconds
+        self._dup_max_repeats = 2     # >N identical hashes in window → drop
+
+        # Canal hash mechanism (opt-in): rolling channel redirect.
+        # When disabled (default), agents stay on the token they register
+        # with — no redirect, no split-brain across hashed channels.
+        self.entry_token: str | None = entry_token or None
         self.channel_hash: str | None = None
-        if entry_token:
+        self.rolling_channel = rolling_channel
+        if entry_token and rolling_channel:
             self._set_channel(entry_token)
 
     @staticmethod
@@ -174,6 +185,33 @@ class WebSocketAgentBusServer:
         for emoji in ["💛","🖖","❤️","♥","💚","💙","💜","🧡","💕","👍","👋","😊","✅","❌","🔄","👀","💬","🤖"]:
             stripped = stripped.replace(emoji, "")
         return len(stripped.strip()) == 0
+
+    def _payload_hash(self, payload: Any) -> str:
+        """Stable short hash of a payload for dup detection (normalized)."""
+        if isinstance(payload, (dict, list)):
+            try:
+                s = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                s = repr(payload)
+        else:
+            s = str(payload or "")
+        s = s.strip().lower()
+        return hashlib.sha1(s.encode("utf-8", "ignore")).hexdigest()[:16]
+
+    def _is_dup_loop(self, token: str, source: str, target: str, payload: Any) -> bool:
+        """Return True if this (src→tgt, payload) repeats too often in window."""
+        key = (token, source, target)
+        h = self._payload_hash(payload)
+        now = time.time()
+        bucket = self._recent_msgs.setdefault(key, [])
+        # Drop entries older than the window
+        bucket[:] = [(t, ph) for (t, ph) in bucket if now - t < self._dup_window]
+        repeats = sum(1 for (_, ph) in bucket if ph == h)
+        bucket.append((now, h))
+        # Cap bucket size to avoid unbounded growth on unique chatter
+        if len(bucket) > 50:
+            del bucket[:-50]
+        return repeats >= self._dup_max_repeats
 
     def _set_channel(self, entry_token: str) -> None:
         """Set the canonical channel for the network.
@@ -325,8 +363,23 @@ class WebSocketAgentBusServer:
                                              payload=repr(payload)[:40],
                                              extra={"reason": "noop"})
                             continue
-                        # ── Agent-pair rate limiter ──────────────────────
+                        # ── Content-based loop detection ────────────────
                         target = msg.get("target", "")
+                        if self.loop_protection and self._is_dup_loop(token, agent_id, target, payload):
+                            await websocket.send(json.dumps({
+                                "type": "message_ack",
+                                "message_id": None,
+                                "dropped": True,
+                                "reason": f"dup_loop ({self._dup_max_repeats}+ identical in {int(self._dup_window)}s)",
+                            }))
+                            self.flow.record(token, "drop", source=agent_id,
+                                             target=target,
+                                             payload=repr(payload)[:60],
+                                             extra={"reason": "dup_loop"})
+                            log.warning("🛑 Dup loop: %s→%s dropping repeated payload",
+                                        agent_id, target or "*")
+                            continue
+                        # ── Agent-pair rate limiter ──────────────────────
                         if target and self.loop_protection:
                             pair = (agent_id, target)
                             now = time.time()
@@ -359,7 +412,6 @@ class WebSocketAgentBusServer:
                         
                         stored = self.bus.handle_send_message(token, msg)
 
-                        target = msg.get("target", "")
                         if target:
                             # Direct message: only to recipient
                             ok = await self._broadcast_to(token, target, {
@@ -649,6 +701,14 @@ class HTTPHealthHandler:
                                                    payload=repr(payload)[:40],
                                                    extra={"reason": "noop", "via": "chat"})
                         result = {"status": "ok", "message_id": None, "dropped": True, "reason": "noop"}
+                    elif (self.ws_server.loop_protection and source != "monitor"
+                          and self.ws_server._is_dup_loop(tok, source, target, payload)):
+                        # Block agent dup loops via chat injection; allow humans
+                        self.ws_server.flow.record(tok, "drop", source=source,
+                                                   target=target,
+                                                   payload=repr(payload)[:60],
+                                                   extra={"reason": "dup_loop", "via": "chat"})
+                        result = {"status": "ok", "message_id": None, "dropped": True, "reason": "dup_loop"}
                     else:
                         result = bus.handle_send_message(tok, msg)
                         ws_event = {"type": "new_message", "message": msg}
@@ -778,11 +838,19 @@ class HTTPHealthHandler:
                 if tok and msg:
                     # ── Anti-loop filter ────────────────────────────────
                     payload = msg.get("payload", "")
+                    src = msg.get("source", "http")
+                    tgt = msg.get("target", "")
                     if self.ws_server.loop_protection and self.ws_server._is_noop_payload(payload):
-                        self.ws_server.flow.record(tok, "drop", source=msg.get("source", "http"),
+                        self.ws_server.flow.record(tok, "drop", source=src,
                                                    payload=repr(payload)[:40],
                                                    extra={"reason": "noop", "via": "http"})
                         result = {"status": "ok", "message_id": None, "dropped": True, "reason": "noop"}
+                    elif (self.ws_server.loop_protection
+                          and self.ws_server._is_dup_loop(tok, src, tgt, payload)):
+                        self.ws_server.flow.record(tok, "drop", source=src, target=tgt,
+                                                   payload=repr(payload)[:60],
+                                                   extra={"reason": "dup_loop", "via": "http"})
+                        result = {"status": "ok", "message_id": None, "dropped": True, "reason": "dup_loop"}
                     else:
                         result = bus.handle_send_message(tok, msg)
                     target = msg.get("target", "")
@@ -1251,16 +1319,34 @@ msgInput.addEventListener('input', () => {
 });
 
 // ── Render message ──
+function fmtPayload(p) {
+  if (p == null) return { text: '', isObj: false };
+  if (typeof p === 'string') return { text: p, isObj: false };
+  if (typeof p === 'object') {
+    if (typeof p.text === 'string') return { text: p.text, isObj: false };
+    if (typeof p.message === 'string') return { text: p.message, isObj: false };
+    if (typeof p.content === 'string') return { text: p.content, isObj: false };
+    if (typeof p.goal === 'string') return { text: p.goal, isObj: false };
+    try { return { text: JSON.stringify(p, null, 2), isObj: true }; }
+    catch (e) { return { text: '[unserializable]', isObj: false }; }
+  }
+  return { text: String(p), isObj: false };
+}
+
 function addMessage(source, payload, ts, dir, token, scroll = true) {
   const div = document.createElement('div');
   div.className = 'msg ' + dir;
   const time = ts ? new Date(ts).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
   const srcLabel = dir === 'out' ? 'you' : esc(source);
   const tokLabel = token && dir === 'in' ? ' <span class="tok">[' + esc(token.slice(0, 8)) + '…]</span>' : '';
+  const f = fmtPayload(payload);
+  const bodyHtml = f.isObj
+    ? '<pre style="margin:4px 0 0 0;white-space:pre-wrap;word-break:break-word;font:12px ui-monospace,Menlo,monospace;color:#a0a8b0">' + esc(f.text) + '</pre>'
+    : esc(f.text);
   div.innerHTML = '<div class="meta"><span class="src">' + srcLabel + '</span>'
     + tokLabel
     + (time ? ' <span style="color:#6e7681">' + time + '</span>' : '') + '</div>'
-    + esc(String(payload ?? ''));
+    + bodyHtml;
   messagesEl.appendChild(div);
   if (scroll) messagesEl.scrollTop = messagesEl.scrollHeight;
   while (messagesEl.children.length > 300) messagesEl.removeChild(messagesEl.firstChild);
@@ -1414,7 +1500,7 @@ function addRow(e) {
     '<td><span class="kind k-' + e.kind + '">' + e.kind + '</span></td>' +
     '<td class="route">' + escape(e.source) + ' <span class="arrow">→</span> ' + target + '</td>' +
     '<td class="ip">' + escape(e.ip || '') + '</td>' +
-    '<td class="payload">' + escape(e.payload == null ? '' : String(e.payload)) + '</td>' +
+    '<td class="payload">' + escape(e.payload == null ? '' : (typeof e.payload === 'object' ? JSON.stringify(e.payload) : String(e.payload))) + '</td>' +
     '<td class="ts">' + deliv + '</td>';
   rows.insertBefore(tr, rows.firstChild);
   while (rows.children.length > 500) rows.removeChild(rows.lastChild);
@@ -1478,7 +1564,8 @@ async def main():
     parser.add_argument("--ws-host", default="0.0.0.0", help="WebSocket host")
     parser.add_argument("--ws-port", type=int, default=9876, help="WebSocket port (default: 9876)")
     parser.add_argument("--http-port", type=int, default=9877, help="HTTP health port (default: 9877)")
-    parser.add_argument("--entry-token", default="", help="Entry token for the network — agents that connect with this token get redirected to a stable channel hash. All agents converge on the same channel.")
+    parser.add_argument("--entry-token", default="", help="Optional entry token for the network — recorded for use by /roll. Without --rolling-channel agents stay on the token they register with (no redirect).")
+    parser.add_argument("--rolling-channel", action="store_true", help="Enable hashed channel redirect: agents registering with --entry-token are redirected to a derived channel hash. OFF by default (avoids split-brain when agents miss the redirect).")
     args = parser.parse_args()
 
     try:
@@ -1493,6 +1580,7 @@ async def main():
     ws_server = WebSocketAgentBusServer(
         http_port=args.http_port,
         entry_token=args.entry_token or None,
+        rolling_channel=args.rolling_channel,
     )
     http_handler = HTTPHealthHandler(ws_server)
 
