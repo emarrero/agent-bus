@@ -1061,13 +1061,14 @@ function connectSSE() {
 }
 
 function handleFlowMessage(e) {
-  const isBroadcast = !currentToken && !currentTarget;
-  const matchesNetwork = !currentToken || e.token === currentToken;
-  const matchesAgent = !currentTarget || e.target === currentTarget || e.source === currentTarget;
-  if (isBroadcast || (matchesNetwork && matchesAgent)) {
-    const dir = e.source === 'monitor' ? 'out' : 'in';
-    addMessage(e.source, e.payload, e.ts, dir, e.token);
+  // Root view: show all messages, filter only by selected agent if any
+  if (currentTarget) {
+    // DM view: show messages to/from this agent
+    if (e.source !== currentTarget && e.target !== currentTarget) return;
   }
+  // If broadcast view (no target selected), show everything
+  const dir = e.source === 'monitor' ? 'out' : 'in';
+  addMessage(e.source, e.payload, e.ts, dir, e.token);
 }
 
 function handleRegister(e) {
