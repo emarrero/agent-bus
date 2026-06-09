@@ -6,4 +6,4 @@ asynchronously, with multimodal support (text and audio).
 Inspired by Google's A2A (Agent-to-Agent) protocol.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
