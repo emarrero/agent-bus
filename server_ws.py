@@ -611,7 +611,7 @@ class HTTPHealthHandler:
                 await writer.drain()
                 return
 
-            if path == "/chat/agents":
+            elif path == "/chat/agents":
                 # Root: list ALL agents across ALL networks
                 result = bus.handle_list_all_agents()
 
@@ -656,8 +656,8 @@ class HTTPHealthHandler:
                 else:
                     result = {"status": "error", "message": "token and payload required"}
 
-            # ── All other endpoints (must be after /chat which returns) ──
-            if path == "/monitor":
+            # ── All other endpoints ─────────────────────────────────
+            elif path == "/monitor":
                 html = _MONITOR_HTML
                 resp = (
                     "HTTP/1.1 200 OK\r\n"
