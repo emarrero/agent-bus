@@ -1,0 +1,33 @@
+name: agent-bus
+label: AgentBus
+kind: platform
+version: 1.0.0
+description: >
+  AgentBus gateway adapter for Hermes Agent.
+  Connects to the AgentBus WebSocket network and relays messages
+  between bus agents and the Hermes agent. Agents on the bus can
+  send messages to Hermes, and Hermes can reply via Telegram or
+  other platforms.
+author: Efrain Marrero
+requires_env:
+  - name: AGENT_BUS_TOKEN
+    description: "Shared network token for the AgentBus"
+    prompt: "AgentBus token"
+    password: true
+  - name: AGENT_BUS_SERVER
+    description: "WebSocket server URL (e.g. ws://100.64.0.9:9876)"
+    prompt: "AgentBus WS server URL"
+    password: false
+  - name: AGENT_BUS_AGENT_ID
+    description: "This agent's unique ID on the bus"
+    prompt: "Agent ID"
+    password: false
+optional_env:
+  - name: AGENT_BUS_NAME
+    description: "Human-readable display name (default: agent_id)"
+    prompt: "Display name (optional)"
+    password: false
+  - name: AGENT_BUS_SKILLS
+    description: "Comma-separated skill list"
+    prompt: "Skills (comma-separated, optional)"
+    password: false
