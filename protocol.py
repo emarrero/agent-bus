@@ -25,6 +25,9 @@ class MessageType(str, Enum):
     AGENT_ANNOUNCE = "agent_announce"
     AGENT_HEARTBEAT = "agent_heartbeat"
     ERROR = "error"
+    P2P_HELLO = "p2p_hello"
+    P2P_HELLO_ACK = "p2p_hello_ack"
+    P2P_PEER_UPDATE = "p2p_peer_update"
 
 
 class TaskStatus(str, Enum):
@@ -59,6 +62,12 @@ class AgentCard:
     endpoint: str | None = None
     """Optional A2A-style HTTP endpoint for direct communication."""
 
+    p2p_port: int | None = None
+    """Port for direct P2P WebSocket connections (0 = P2P disabled)."""
+
+    p2p_ip: str | None = None
+    """IP/hostname for P2P connections (auto-detected from WS remote_addr)."""
+
     # Metadata
     tags: dict[str, str] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
@@ -73,7 +82,7 @@ class AgentCard:
     def from_dict(cls, data: dict) -> "AgentCard":
         valid_fields = {
             "agent_id", "name", "description", "version", "skills",
-            "modalities", "endpoint", "tags", "created_at",
+            "modalities", "endpoint", "p2p_port", "p2p_ip", "tags", "created_at",
         }
         filtered = {k: v for k, v in data.items() if k in valid_fields}
         return cls(**filtered)

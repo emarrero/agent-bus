@@ -281,6 +281,8 @@ class WebSocketAgentBusServer:
             token = data.get("token", "")
             card = data.get("card", {})
             card["ip"] = client_ip  # surface in /agents and agents_list
+            card["p2p_ip"] = client_ip  # same IP for P2P by default
+            # p2p_port comes from the card if provided; default 0 = disabled
 
             if not agent_id or not token:
                 await websocket.send(json.dumps({"status": "error", "message": "agent_id and token required"}))
@@ -800,6 +802,19 @@ class HTTPHealthHandler:
 
             elif path == "/agents" and token:
                 result = bus.handle_list_agents(token)
+
+            elif path == "/discover" and token:
+                """Return P2P routing table: agent_id → ip, p2p_port, name."""
+                agents = bus.handle_list_agents(token).get("agents", [])
+                p2p_table = {}
+                for agent in agents:
+                    aid = agent.get("agent_id", "")
+                    p2p_table[aid] = {
+                        "name": agent.get("name", aid),
+                        "ip": agent.get("p2p_ip", agent.get("ip", "")),
+                        "p2p_port": agent.get("p2p_port", 0),
+                    }
+                result = {"status": "ok", "peers": p2p_table, "count": len(p2p_table)}
 
             elif path == "/messages" and token:
                 agent_id = qs.get("agent_id", [None])[0]

@@ -134,6 +134,12 @@ except ImportError:
 from gateway.config import Platform
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 
+# P2P direct connections
+try:
+    from agent_bus.p2p import P2PManager
+except ImportError:
+    P2PManager = None  # type: ignore[assignment]
+
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -254,6 +260,19 @@ class AgentBusAdapter(BasePlatformAdapter):
         self._connected = False
         self._send_lock = asyncio.Lock()
 
+        # P2P direct connections
+        self._p2p: P2PManager | None = None
+        self._p2p_port: int = int(
+            extra.get("p2p_port")
+            or os.environ.get("AGENT_BUS_P2P_PORT")
+            or "9878"
+        )
+        self._http_port: int = int(
+            extra.get("http_port")
+            or os.environ.get("AGENT_BUS_HTTP_PORT")
+            or "9877"
+        )
+
     # ── Lifecycle ────────────────────────────────────────────────────────
 
     async def connect(self) -> bool:
@@ -283,6 +302,7 @@ class AgentBusAdapter(BasePlatformAdapter):
                 "name": self._display_name,
                 "skills": self._skills,
                 "modalities": ["text"],
+                "p2p_port": self._p2p_port if self._p2p_port > 0 else 0,
             }
 
             # Register
@@ -309,6 +329,25 @@ class AgentBusAdapter(BasePlatformAdapter):
 
             self._connected = True
 
+            # Start P2P manager for direct agent-to-agent connections
+            if P2PManager is not None and self._p2p_port > 0:
+                try:
+                    self._p2p = P2PManager(
+                        agent_id=self._agent_id,
+                        p2p_port=self._p2p_port,
+                    )
+                    self._p2p.on_message(self._on_p2p_message)
+                    await self._p2p.start()
+
+                    # Fetch peer table from server's /discover endpoint
+                    await self._discover_peers()
+                except Exception as exc:
+                    logger.warning("P2P init failed (relay fallback): %s", exc)
+                    self._p2p = None
+            else:
+                logger.info("P2P disabled (port=%s, P2PManager=%s)",
+                            self._p2p_port, P2PManager)
+
             # Start background reader for incoming messages
             self._reader_task = asyncio.create_task(
                 self._read_loop(),
@@ -330,8 +369,16 @@ class AgentBusAdapter(BasePlatformAdapter):
             return False
 
     async def disconnect(self) -> None:
-        """Disconnect from the AgentBus server."""
+        """Disconnect from the AgentBus server and stop P2P."""
         self._connected = False
+
+        # Stop P2P manager first
+        if self._p2p:
+            try:
+                await self._p2p.stop()
+            except Exception:
+                pass
+            self._p2p = None
 
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
@@ -384,6 +431,13 @@ class AgentBusAdapter(BasePlatformAdapter):
             },
         }
 
+        # Try P2P direct first (lower latency, no server bottleneck)
+        if self._p2p and chat_id:
+            sent = await self._p2p.send(chat_id, msg_payload["message"])
+            if sent:
+                return SendResult(success=True)
+
+        # Fall back to server relay
         try:
             async with self._send_lock:
                 await self._ws.send(json.dumps(msg_payload))
@@ -395,6 +449,67 @@ class AgentBusAdapter(BasePlatformAdapter):
                 error=str(exc),
                 retryable=True,
             )
+
+    # ── P2P direct connections ──────────────────────────────────────────
+
+    async def _discover_peers(self) -> None:
+        """Fetch P2P routing table from server's /discover endpoint."""
+        if not self._p2p:
+            return
+        try:
+            import httpx
+            api_base = self._server_url.replace("ws://", "http://").replace("wss://", "https://")
+            if "://" in api_base:
+                parts = api_base.split("/")
+                api_base = "/".join(parts[:3])
+
+            resp = httpx.get(
+                f"{api_base}/discover",
+                headers={"X-Agent-Token": self._bus_token},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("status") == "ok":
+                    await self._p2p.update_peers(data)
+                    logger.info("📋 P2P routing table: %d peer(s) discovered",
+                                data.get("count", 0))
+            else:
+                logger.debug("P2P discover returned %d", resp.status_code)
+        except Exception as exc:
+            logger.debug("P2P discover failed: %s", exc)
+
+    async def _on_p2p_message(self, message: dict) -> None:
+        """Handle a message received via direct P2P connection."""
+        source = message.get("source", "unknown")
+        payload = message.get("payload", "")
+        msg_id = message.get("id", "")
+
+        if not payload:
+            return
+
+        logger.debug("P2P message from %s: %.80s", source, payload)
+
+        from gateway.session import SessionSource
+        from gateway.platforms.base import MessageEvent
+
+        event = MessageEvent(
+            source=SessionSource(
+                platform=self.platform,
+                chat_id=source,
+                user_id=source,
+                thread_id=source,
+                chat_type="dm",
+            ),
+            text=payload,
+            message_id=msg_id or "",
+            raw_message={"type": "new_message", "message": message, "_via_p2p": True},
+        )
+
+        asyncio.create_task(
+            self.handle_message(event),
+            name=f"agentbus-p2p-handle-{msg_id or source}",
+        )
 
     # ── Message handling ─────────────────────────────────────────────────
 
@@ -425,11 +540,15 @@ class AgentBusAdapter(BasePlatformAdapter):
                     await self._on_new_message(data)
                 elif msg_type == "agent_joined":
                     logger.info("Agent joined: %s", data.get("agent_id"))
+                    # New agent may support P2P — refresh peer table
+                    if self._p2p:
+                        asyncio.create_task(self._discover_peers())
                 elif msg_type == "agent_left":
                     logger.info("Agent left: %s", data.get("agent_id"))
                 elif msg_type == "agents_list":
-                    # Periodic agent list refresh (ignore)
-                    pass
+                    # Refresh P2P routing table from fresh agent list
+                    if self._p2p:
+                        asyncio.create_task(self._discover_peers())
                 # Ignore other types (ping/pong handled by server)
 
         except asyncio.CancelledError:

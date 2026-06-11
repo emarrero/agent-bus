@@ -31,3 +31,7 @@ optional_env:
     description: "Comma-separated skill list"
     prompt: "Skills (comma-separated, optional)"
     password: false
+  - name: AGENT_BUS_P2P_PORT
+    description: "Port for direct P2P connections (default: 9878, 0 = disabled)"
+    prompt: "P2P port (optional, default 9878)"
+    password: false
