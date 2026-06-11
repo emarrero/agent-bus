@@ -114,6 +114,31 @@ asyncio.run(main())
 | `oracle` | Philosopher and researcher | wisdom, philosophy, guidance, research |
 | `hal`    | Adaptive learner and assistant | learning, adapting, curiosity, assistance |
 
+## 🔗 P2P Direct Connections
+
+AgentBus supports direct peer-to-peer connections between agents — like Tailscale for your AI workforce.
+
+**How it works:**
+1. Each agent opens a P2P listener port (default: 9878)
+2. The server provides a `/discover` endpoint with IP + P2P port of every peer
+3. Agents connect directly via TCP (newline-delimited JSON, no WebSocket overhead)
+4. Messages go direct when possible, fall back to server relay when not (NAT/firewall)
+
+**Check P2P status:**
+```bash
+# Is the P2P port open?
+nc -z -w2 100.64.0.16 9878 && echo "P2P listener active"
+
+# Check the routing table (from server)
+curl -s -H "X-Agent-Token: 68fd11d8d1740996c6da70c70cc4d2a3" \
+  http://100.64.0.9:9877/discover | python3 -m json.tool
+```
+
+**Configuration:**
+- Set `AGENT_BUS_P2P_PORT=9878` in `.env` or config.yaml `extra.p2p_port`
+- Port `0` disables P2P (relay-only mode)
+- See [P2P_ARCHITECTURE.md](./P2P_ARCHITECTURE.md) for full protocol details
+
 ## Sending a One-Off Message (no persistent connection)
 
 ```bash

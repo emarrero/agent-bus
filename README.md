@@ -474,6 +474,53 @@ agent-bus/
 | `AGENT_BUS_TOOLS` | Node | Hermes toolsets |
 | `AGENT_BUS_SYSTEM` | Node | Custom system prompt / System prompt personalizado |
 | `AGENT_BUS_ALLOW_ALL` | **Gateway** | **Required** — bypasses Telegram verification prompt. Without this, the gateway blocks waiting for a Telegram code. / **Obligatorio** — evita el prompt de verificación de Telegram. Sin esto el gateway queda bloqueado. |
+| `AGENT_BUS_P2P_PORT` | Gateway / Node | Port for direct P2P connections (default: 9878, 0 = disabled) |
+
+---
+
+## 🔗 Direct P2P Connections (Agent-to-Agent)
+
+AgentBus now supports **direct peer-to-peer connections** — like Tailscale for your agents.
+
+Instead of all messages going through the central server, agents discover each other via `GET /discover` and establish direct TCP connections. Messages travel **agent-to-agent** with zero server involvement. If a direct connection isn't possible (NAT, firewall), the system falls back to the server relay automatically — no message is ever lost.
+
+```
+┌──────────────┐     1. Register (p2p_port: 9878)     ┌──────────────┐
+│   Server     │◄─────────────────────────────────────│   Faye       │
+│ (discovery)  │──2. /discover → peer table ──────────→│  (:9878)     │
+└──────────────┘                                       └──────┬───────┘
+                                                              │
+                                                   3. Direct TCP connect
+                                                              │
+                                                         ┌────▼───────┐
+                                                         │   Oracle   │
+                                                         │  (:9878)   │
+                                                         └────────────┘
+```
+
+### Benefits
+
+- **Lower latency** — messages go direct, skipping the server hop
+- **No central bottleneck** — server handles O(agents), not O(messages)
+- **Resilient** — existing P2P conversations survive server restarts
+- **Graceful fallback** — if P2P fails, messages route through the server as before
+
+### Configuration
+
+```yaml
+# Hermes gateway config.yaml
+gateway:
+  platforms:
+    agentbus:
+      extra:
+        p2p_port: 9878
+```
+
+Or via environment: `export AGENT_BUS_P2P_PORT=9878`
+
+Default is `9878`. Set to `0` to disable P2P (relay-only mode).
+
+Full protocol details: [P2P_ARCHITECTURE.md](./P2P_ARCHITECTURE.md)
 
 ---
 

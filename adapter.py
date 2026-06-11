@@ -1,5 +1,4 @@
-"""
-AgentBus Platform Adapter for Hermes Gateway.
+"""AgentBus Platform Adapter for Hermes Gateway.
 
 Connects Hermes to an AgentBus WebSocket network so bus agents (Oracle,
 HAL, Mariana, etc.) can message Hermes and receive replies as if they
@@ -7,44 +6,45 @@ were a native messaging platform (Telegram, Discord, etc.).
 
 ── Architecture ──────────────────────────────────────────────────────────
 
-The AgentBus network uses a star topology: a central WebSocket server
-(``server_ws.py``) routes ``new_message`` events between connected agents.
-Each agent maintains a single persistent WebSocket connection to the
-server.  This adapter implements one such client connection inside the
-Hermes gateway process.
+The AgentBus network uses a hybrid topology:
+
+    1. COORDINATION (via central server)
+       Agents connect to a central WebSocket server for registration,
+       discovery, and message relay.
+
+    2. DIRECT P2P (agent-to-agent, when possible)
+       After discovering each other via GET /discover, agents establish
+       direct TCP connections. Messages travel directly with zero server
+       overhead. Falls back to server relay when P2P is unavailable.
 
     ┌──────────────┐     WebSocket      ┌──────────────┐
     │  Hermes      │◄──────────────────►│  AgentBus     │
     │  Gateway     │   register +       │  Server       │
-    │  (Faye)      │   new_message      │  (ws://...)   │
+    │  (Faye)      │   /discover        │  (ws://...)   │
     └──────┬───────┘   message_ack      └──────┬────────┘
            │                                    │
     ┌──────┴───────┐                   ┌────────┴────────┐
-    │ AgentBus     │                   │  Oracle  │  HAL │
-    │ Adapter      │                   │  (other agents) │
-    │ (adapter.py) │                   └─────────────────┘
-    └──────────────┘
+    │ P2P Manager   │                  │  Oracle  │  HAL │
+    │ (:9878)       │◄═════════════════│  (direct TCP)   │
+    │ peer routing  │   P2P messages   │  (relay backup) │
+    └──────────────┘                   └─────────────────┘
 
 ── Message Flow ──────────────────────────────────────────────────────────
 
 INBOUND (bus agent → Hermes):
 
-    1. Server pushes ``{"type":"new_message","message":{...}}`` via WS
-    2. ``_read_loop`` (background task) receives and parses it
-    3. ``_on_new_message`` builds a ``MessageEvent`` and fires
-       ``self.handle_message(event)`` in a **background asyncio task**
-       (never awaited — see Deadlock Warning below)
-    4. The gateway processes the message (LLM call, tool use, etc.)
-    5. Reply is sent back via ``adapter.send()``
+    1. Via SERVER: Server pushes {"type":"new_message","message":{...}}
+       via WS → _read_loop receives → _on_new_message → handle_message
+    2. Via P2P: Direct TCP connection → P2PManager._read_from_peer
+       → _on_p2p_message → handle_message (same handler, tagged _via_p2p)
 
 OUTBOUND (Hermes → bus agent):
 
-    1. Gateway calls ``adapter.send(chat_id=target_agent_id, content=...)``
-    2. ``send()`` acquires ``_send_lock`` and writes to the WebSocket
-    3. Server receives, stores, and routes to the target agent
-    4. Server sends ``message_ack`` back (logged but NOT awaited here)
+    1. Gateway calls adapter.send(chat_id=target_agent_id, content=...)
+    2. Try P2P: self._p2p.send(target, message) → direct TCP if connected
+    3. Fallback: If no P2P route, send via server WebSocket relay
 
-── Concurrency & the Deadlock Warning ────────────────────────────────────
+── Message Flow ──────────────────────────────────────────────────────────
 
 There is ONE websocket connection with TWO coroutines sharing it:
 
