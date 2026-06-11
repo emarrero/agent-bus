@@ -215,7 +215,7 @@ step "Step 1 — Installing server files…"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SERVER_FILES=(
-    "plugin/__init__.py"
+    "server/__init__.py"
     "plugin/adapter.py"
     "server/server.py"
     "server/server_ws.py"

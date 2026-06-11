@@ -41,7 +41,7 @@ die()  { err "$*"; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-PLUGIN_DIR="$HERMES_HOME/plugins/agentbus"
+PLUGIN_DIR="$HERMES_HOME/plugins/agent-bus"
 MODULE_DST="$HERMES_HOME/agent_bus"
 CONFIG_FILE="$HERMES_HOME/config.yaml"
 OPT_WS_PORT=9876  # shown in uninstall summary only
@@ -114,8 +114,8 @@ if not os.path.exists(config_path):
 with open(config_path) as f:
     text = f.read()
 
-# Remove agentbus from plugins.enabled list
-text = re.sub(r'\n  - agentbus\n', '\n', text)
+# Remove agent-bus from plugins.enabled list
+text = re.sub(r'\\n  - agent-bus\\n', '\\n', text)
 
 # Remove gateway.platforms.agentbus block
 # Match "    agentbus:" and all following indented lines
@@ -128,7 +128,7 @@ text = re.sub(
 if not dry:
     with open(config_path, 'w') as f:
         f.write(text)
-    print("  \033[0;32m✓\033[0m  config.yaml updated (agentbus removed)")
+    print("  \033[0;32m✓\033[0m  config.yaml updated (agent-bus removed)")
 else:
     print("  \033[1;33m!\033[0m  [dry] would update config.yaml")
 PYEOF
@@ -352,15 +352,15 @@ with open(config_path) as f:
 changes = []
 
 # ── plugins.enabled ───────────────────────────────────────────────────────────
-if "- agentbus" not in text:
-    # Find the enabled: list and add agentbus
+if "- agent-bus" not in text:
+    # Find the enabled: list and add agent-bus
     text = re.sub(
         r'(plugins:\s*\n  enabled:\s*\n)((?:  - [^\n]+\n)*)',
-        lambda m: m.group(1) + m.group(2) + "  - agentbus\n",
+        lambda m: m.group(1) + m.group(2) + "  - agent-bus\n",
         text,
         count=1,
     )
-    changes.append("added agentbus to plugins.enabled")
+    changes.append("added agent-bus to plugins.enabled")
 
 # ── gateway.platforms.agentbus ────────────────────────────────────────────────
 # token + server MUST be in config.yaml — the gateway runs under launchd and
