@@ -209,20 +209,25 @@ fi
 
 step "Step 1 — Installing server files…"
 
+# Repo layout: server/, client/, plugin/. Files are deployed FLAT into
+# $MODULE_DIR/agent_bus so the import paths (agent_bus.server_ws, …)
+# stay the same as before the repo restructure.
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 SERVER_FILES=(
-    "__init__.py"
-    "adapter.py"
-    "server.py"
-    "server_ws.py"
-    "protocol.py"
-    "bus.py"
-    "router.py"
-    "client.py"
-    "hermes_agent.py"
-    "multimodal.py"
-    "cli.py"
-    "__main__.py"
-    "node.py"
+    "plugin/__init__.py"
+    "plugin/adapter.py"
+    "server/server.py"
+    "server/server_ws.py"
+    "server/protocol.py"
+    "server/bus.py"
+    "server/router.py"
+    "client/client.py"
+    "client/hermes_agent.py"
+    "client/p2p.py"
+    "client/cli.py"
+    "client/__main__.py"
+    "client/node.py"
 )
 
 MODULE_DIR="$OPT_INSTALL_DIR/agent_bus"
@@ -232,12 +237,12 @@ run "mkdir -p '$OPT_LOG_DIR'"
 
 UPDATED=0
 for f in "${SERVER_FILES[@]}"; do
-    src="$SCRIPT_DIR/$f"
-    dst="$MODULE_DIR/$f"
+    src="$REPO_DIR/$f"
+    dst="$MODULE_DIR/$(basename "$f")"
     if [[ -f "$src" ]]; then
         if [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst"; then
             run "cp '$src' '$dst'"
-            info "  installed: agent_bus/$f"
+            info "  installed: agent_bus/$(basename "$f")"
             UPDATED=$((UPDATED + 1))
         fi
     else

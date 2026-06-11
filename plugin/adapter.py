@@ -141,14 +141,17 @@ _P2P_MANAGER_CLS: Any = None
 
 
 def _get_p2p_manager():
-    """Load P2PManager from the p2p.py sitting next to this file.
+    """Load P2PManager with zero configuration.
 
-    Two paths, no sys.path mutation, no PYTHONPATH, no package-name guessing:
+    Three paths, no sys.path mutation, no PYTHONPATH, no package-name
+    guessing:
 
     1. Relative import — works whenever this module was loaded as part of
-       a package (``agent_bus``, ``agentbus``, or any other name).
-    2. Direct file load via importlib — works when the plugin loader
-       executed adapter.py as a flat module with no package context.
+       a package that has p2p.py as a sibling (deployed flat module dir).
+    2. Sibling file load — installers copy p2p.py next to adapter.py in
+       the plugin dir.
+    3. ``../client/p2p.py`` — repo layout, used when the whole repository
+       was cloned (e.g. ``hermes plugins install emarrero/agent-bus``).
     """
     global _P2P_MANAGER_CLS
     if _P2P_MANAGER_CLS is not None:
@@ -165,9 +168,14 @@ def _get_p2p_manager():
     import importlib.util
     import sys
 
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "p2p.py")
-    if not os.path.exists(path):
-        logger.warning("P2P unavailable: %s not found", path)
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "p2p.py"),                  # installed plugin dir
+        os.path.join(here, "..", "client", "p2p.py"),  # repo layout
+    ]
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if path is None:
+        logger.warning("P2P unavailable: p2p.py not found in %s", candidates)
         return None
     try:
         spec = importlib.util.spec_from_file_location("_agentbus_p2p", path)

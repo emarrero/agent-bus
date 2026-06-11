@@ -42,6 +42,30 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.expanduser("~/.hermes"))
 
+
+def _import_connect_to_bus():
+    """Zero-config import of connect_to_bus.
+
+    Tries the deployed package (``~/.hermes/agent_bus``), then the sibling
+    hermes_agent.py so the node also runs straight from a repo clone
+    (``python3 client/node.py``) with no PYTHONPATH.
+    """
+    try:
+        from agent_bus.hermes_agent import connect_to_bus
+        return connect_to_bus
+    except ImportError:
+        pass
+    import importlib.util
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hermes_agent.py")
+    if not os.path.exists(path):
+        return None
+    spec = importlib.util.spec_from_file_location("_agentbus_hermes_agent", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["_agentbus_hermes_agent"] = mod
+    spec.loader.exec_module(mod)
+    return mod.connect_to_bus
+
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(message)s",
@@ -374,7 +398,7 @@ async def handle_message(bus, msg: dict, args: argparse.Namespace) -> None:
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 async def run(args: argparse.Namespace) -> None:
-    from agent_bus.hermes_agent import connect_to_bus
+    connect_to_bus = _import_connect_to_bus()
 
     delay = 5
     # Track the actual token (may change via channel redirect)
@@ -455,10 +479,9 @@ def main() -> None:
     args.system = args.system or _DEFAULT_SYSTEM
 
     # Check dependencies
-    try:
-        from agent_bus.hermes_agent import connect_to_bus  # noqa: F401
-    except ImportError:
-        sys.exit("ERROR: agent_bus not found — add ~/.hermes to sys.path")
+    if _import_connect_to_bus() is None:
+        sys.exit("ERROR: hermes_agent.py not found — run from the repo "
+                 "(client/node.py) or install with: bash install.sh")
 
     try:
         import websockets  # noqa: F401

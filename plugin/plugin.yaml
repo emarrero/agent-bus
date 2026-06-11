@@ -1,7 +1,7 @@
 name: agent-bus
 label: AgentBus
 kind: platform
-version: 1.0.0
+version: 0.8.0
 description: >
   AgentBus gateway adapter for Hermes Agent.
   Connects to the AgentBus WebSocket network and relays messages

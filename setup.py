@@ -4,7 +4,7 @@ from pathlib import Path
 from setuptools import setup
 
 # Single source of truth: __init__.py
-init = Path(__file__).parent / "__init__.py"
+init = Path(__file__).parent / "plugin" / "__init__.py"
 version = re.search(
     r'__version__\s*=\s*"([^"]+)"',
     init.read_text(encoding="utf-8"),
@@ -20,10 +20,15 @@ setup(
     url="https://github.com/emarrero/agent-bus",
     license="MIT",
     python_requires=">=3.10",
-    packages=["agent_bus"],
-    package_dir={"agent_bus": "."},
-    package_data={"agent_bus": ["py.typed"]},
-    include_package_data=True,
+    # Repo layout is server/ + client/ + plugin/; deployment is file-copy
+    # via install.sh (flat agent_bus/ package). pip install builds the
+    # subpackages under the agent_bus namespace.
+    packages=["agent_bus.server", "agent_bus.client", "agent_bus.plugin"],
+    package_dir={
+        "agent_bus.server": "server",
+        "agent_bus.client": "client",
+        "agent_bus.plugin": "plugin",
+    },
     extras_require={
         "ws": ["websockets"],
     },
@@ -36,7 +41,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "agent-bus=agent_bus.cli:main",
+            "agent-bus=agent_bus.client.cli:main",
         ],
     },
 )

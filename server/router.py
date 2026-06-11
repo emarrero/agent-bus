@@ -9,8 +9,30 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .protocol import AgentCard, Message, MessageType, TaskRequest
-from .bus import MessageBus
+# Zero-config import: package-relative when loaded as part of a package,
+# sibling-file load when executed without package context.
+try:
+    from .protocol import AgentCard, Message, MessageType, TaskRequest
+    from .bus import MessageBus
+except ImportError:
+    import importlib.util as _ilu
+    import os as _os
+    import sys as _sys
+
+    def _load_sibling(name: str, alias: str):
+        mod = _sys.modules.get(alias)
+        if mod is None:
+            path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), name)
+            spec = _ilu.spec_from_file_location(alias, path)
+            mod = _ilu.module_from_spec(spec)
+            _sys.modules[alias] = mod
+            spec.loader.exec_module(mod)
+        return mod
+
+    _proto = _load_sibling("protocol.py", "_agentbus_protocol")
+    AgentCard, Message = _proto.AgentCard, _proto.Message
+    MessageType, TaskRequest = _proto.MessageType, _proto.TaskRequest
+    MessageBus = _load_sibling("bus.py", "_agentbus_bus").MessageBus
 
 
 class AgentRouter:

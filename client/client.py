@@ -36,7 +36,33 @@ import urllib.request
 import urllib.error
 from typing import Any, Callable
 
-from .protocol import AgentCard, Message, MessageType, TaskRequest, TaskResponse, TaskStatus
+# Zero-config import: package-relative when deployed flat (protocol.py is a
+# sibling in ~/.hermes/agent_bus/), file load from ../server/ in the repo
+# layout (protocol.py lives in server/).
+try:
+    from .protocol import AgentCard, Message, MessageType, TaskRequest, TaskResponse, TaskStatus
+except ImportError:
+    import importlib.util as _ilu
+    import sys as _sys
+
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _candidates = [
+        os.path.join(_here, "protocol.py"),                    # deployed flat
+        os.path.join(_here, "..", "server", "protocol.py"),    # repo layout
+    ]
+    _mod = _sys.modules.get("_agentbus_protocol")
+    if _mod is None:
+        for _path in _candidates:
+            if os.path.exists(_path):
+                _spec = _ilu.spec_from_file_location("_agentbus_protocol", _path)
+                _mod = _ilu.module_from_spec(_spec)
+                _sys.modules["_agentbus_protocol"] = _mod
+                _spec.loader.exec_module(_mod)
+                break
+        else:
+            raise
+    AgentCard, Message, MessageType = _mod.AgentCard, _mod.Message, _mod.MessageType
+    TaskRequest, TaskResponse, TaskStatus = _mod.TaskRequest, _mod.TaskResponse, _mod.TaskStatus
 
 
 class AgentBusClient:

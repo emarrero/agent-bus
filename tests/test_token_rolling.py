@@ -29,8 +29,12 @@ async def test_rolling():
     # ── Start server ────────────────────────────────────────────────
     import os
     env = os.environ.copy()
+    server_script = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "server", "server_ws.py",
+    )
     proc = subprocess.Popen(
-        [sys.executable, "server_ws.py",
+        [sys.executable, server_script,
          "--ws-port", "19876", "--http-port", "19877",
          "--entry-token", ENTRY_TOKEN],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

@@ -7,7 +7,7 @@
 #  AgentBus server (like Telegram — always connected).
 #
 #  Run this on each machine that has Hermes installed.
-#  To install the central server, use: sudo bash install-server.sh
+#  To install the central server, use: sudo bash scripts/install-server.sh
 #
 #  Usage:
 #    bash install.sh                         # interactive
@@ -178,9 +178,9 @@ if ! "$PYTHON" -c "import websockets" 2>/dev/null; then
 fi
 ok "websockets available"
 
-# Source agent_bus directory
-if [[ ! -f "$SCRIPT_DIR/__init__.py" ]]; then
-    die "Must be run from the agent_bus project directory (got: $SCRIPT_DIR)"
+# Source agent-bus repo directory
+if [[ ! -f "$SCRIPT_DIR/plugin/__init__.py" ]]; then
+    die "Must be run from the agent-bus repo root (got: $SCRIPT_DIR)"
 fi
 ok "Source directory: $SCRIPT_DIR"
 
@@ -263,15 +263,15 @@ step "Step 1 — Syncing agent_bus module to Hermes…"
 if [[ $OPT_NO_SYNC -eq 1 ]]; then
     info "Skipped (--no-sync)"
 else
-    # Files that belong to the library (exclude runtime/data files)
+    # Library files (repo layout: server/, client/, plugin/) — deployed
+    # FLAT into $MODULE_DST so existing imports (from agent_bus.X import …)
+    # keep working unchanged on every machine.
     PY_FILES=(
-        __init__.py __main__.py
-        adapter.py
-        bus.py cli.py client.py
-        hermes_agent.py multimodal.py
-        protocol.py router.py
-        server.py server_ws.py
-        node.py
+        plugin/__init__.py plugin/adapter.py
+        client/__main__.py client/cli.py client/client.py
+        client/hermes_agent.py client/node.py client/p2p.py
+        server/bus.py server/protocol.py server/router.py
+        server/server.py server/server_ws.py
     )
 
     run "mkdir -p '$MODULE_DST'"
@@ -279,7 +279,7 @@ else
     UPDATED=0
     for f in "${PY_FILES[@]}"; do
         src="$SCRIPT_DIR/$f"
-        dst="$MODULE_DST/$f"
+        dst="$MODULE_DST/$(basename "$f")"
         if [[ -f "$src" ]]; then
             if [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst"; then
                 run "cp '$src' '$dst'"
@@ -300,24 +300,30 @@ fi
 
 step "Step 2 — Installing Hermes plugin…"
 
-PLUGIN_SRC="$SCRIPT_DIR"
-
-# The plugin source must ship the three files the Hermes loader needs:
+# The plugin dir must ship the files the Hermes loader needs:
 #   __init__.py  — entry point (loader imports this and calls register())
 #   adapter.py   — AgentBusAdapter + register()
 #   plugin.yaml  — platform manifest
-for f in __init__.py adapter.py plugin.yaml; do
-    if [[ ! -f "$PLUGIN_SRC/$f" ]]; then
-        die "Plugin source missing: $PLUGIN_SRC/$f — re-clone the project"
+#   p2p.py       — direct-connection manager (adapter loads it from its
+#                  own dir; without this copy P2P is silently unavailable)
+PLUGIN_FILES=(
+    plugin/__init__.py plugin/adapter.py plugin/plugin.yaml
+    client/p2p.py
+)
+for f in "${PLUGIN_FILES[@]}"; do
+    if [[ ! -f "$SCRIPT_DIR/$f" ]]; then
+        die "Plugin source missing: $SCRIPT_DIR/$f — re-clone the project"
     fi
 done
 
 run "mkdir -p '$PLUGIN_DIR'"
 
-for f in __init__.py adapter.py plugin.yaml; do
-    if [[ ! -f "$PLUGIN_DIR/$f" ]] || ! cmp -s "$PLUGIN_SRC/$f" "$PLUGIN_DIR/$f"; then
-        run "cp '$PLUGIN_SRC/$f' '$PLUGIN_DIR/$f'"
-        info "  installed: $f"
+for f in "${PLUGIN_FILES[@]}"; do
+    src="$SCRIPT_DIR/$f"
+    dst="$PLUGIN_DIR/$(basename "$f")"
+    if [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst"; then
+        run "cp '$src' '$dst'"
+        info "  installed: $(basename "$f")"
     fi
 done
 
@@ -325,7 +331,7 @@ done
 if [[ $OPT_DRY -eq 0 && ! -f "$PLUGIN_DIR/__init__.py" ]]; then
     die "Plugin __init__.py missing after install — the loader will skip the plugin"
 fi
-ok "Plugin installed (__init__.py, adapter.py, plugin.yaml)"
+ok "Plugin installed (__init__.py, adapter.py, plugin.yaml, p2p.py)"
 
 # ── Step 3 — Update config.yaml ──────────────────────────────────────────────
 
@@ -458,7 +464,7 @@ try:
 except Exception as e:
     print(f"  \033[1;33m!\033[0m  Server not reachable: {e}")
     print(f"       Is the server running? Deploy it with:")
-    print(f"         sudo bash install-server.sh --ws-port 9876")
+    print(f"         sudo bash scripts/install-server.sh --ws-port 9876")
     sys.exit(1)
 PYEOF
     : # server reachable
@@ -505,5 +511,5 @@ echo "    hermes gateway status      # verify AgentBus 🤖 shows up"
 echo "    hermes gateway restart     # apply config changes"
 echo ""
 echo -e "  To install the central server on the server machine:"
-echo "    sudo bash install-server.sh --ws-port $OPT_WS_PORT"
+echo "    sudo bash scripts/install-server.sh --ws-port $OPT_WS_PORT"
 echo ""

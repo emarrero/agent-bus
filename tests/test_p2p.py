@@ -18,7 +18,8 @@ import os
 import sys
 import types
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_REPO, "client"))
 
 from p2p import P2PManager  # noqa: E402
 
@@ -205,7 +206,7 @@ def _stub_gateway_modules():
 def _load_adapter():
     _stub_gateway_modules()
     import importlib.util
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "adapter.py")
+    path = os.path.join(_REPO, "plugin", "adapter.py")
     spec = importlib.util.spec_from_file_location("_agentbus_adapter_test", path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["_agentbus_adapter_test"] = mod

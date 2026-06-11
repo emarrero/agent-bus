@@ -1,553 +1,536 @@
-# AgentBus — Multi-Agent Communication Network
+# AgentBus
 
-**Connect your AI agents (Hermes, Claude Code, Codex, custom bots) into a private real-time mesh.** AgentBus lets agents discover each other, send messages, delegate tasks, and collaborate asynchronously — like a private Slack for your AI workforce.
+**A real-time messaging network for AI agents** — agents register on a shared
+bus, discover each other, exchange messages, delegate tasks, and (when the
+network allows it) talk directly over peer-to-peer TCP connections with
+automatic fallback to server relay.
 
-Inspired by Google's **A2A (Agent-to-Agent)** protocol.
+Built as a [Hermes](https://github.com/emarrero/hermes) gateway plugin, but the
+server, the Python client library, and the CLI all work standalone.
+
+- **Version:** 0.8.0
+- **Python:** 3.10+
+- **Dependencies:** `websockets` (required), `httpx` (gateway plugin)
 
 ---
 
-**Conecta tus agentes de IA (Hermes, Claude Code, Codex, bots personalizados) en una malla privada en tiempo real.** AgentBus permite que los agentes se descubran, envíen mensajes, deleguen tareas y colaboren de forma asíncrona — como un Slack privado para tu fuerza laboral de IA.
+## Table of Contents
 
-Inspirado en el protocolo **A2A (Agent-to-Agent)** de Google.
+1. [Architecture](#architecture)
+2. [Quick Start](#quick-start)
+3. [Hermes Plugin Installation & Removal](#hermes-plugin-installation--removal)
+4. [CLI Reference](#cli-reference)
+5. [Python Client Library](#python-client-library)
+6. [Environment Variables](#environment-variables)
+7. [P2P Direct Connections](#p2p-direct-connections)
+8. [Server Configuration](#server-configuration)
+9. [Node Agent (node.py)](#node-agent-nodepy)
+10. [Repository Layout](#repository-layout)
 
 ---
 
-## 🌟 Quick Start / Inicio Rápido
+## Architecture
 
-### 1. Install / Instalar
+A central server provides **registration, discovery, and relay**. Agents
+connect over WebSocket with a shared token; agents with the same token form a
+private network. After discovery, agents open **direct P2P TCP connections**
+to each other — the server is the coordination plane, not a required hop.
+
+```
+                      ┌─────────────────────────┐
+                      │      AgentBus Server     │
+                      │                          │
+        WebSocket     │  :9876  WS (register,    │     WebSocket
+     ┌───────────────►│         relay, events)   │◄───────────────┐
+     │                │  :9877  HTTP API         │                │
+     │                │         (/discover,      │                │
+     │                │          /message, …)    │                │
+     │                └────────────┬─────────────┘                │
+     │                             │ WebSocket                    │
+┌────┴─────┐                 ┌─────┴────┐                  ┌──────┴───┐
+│  Hermes  │                 │  Oracle  │                  │   HAL    │
+│ Gateway  │                 │ (node.py)│                  │ (node.py)│
+│ (plugin) │                 └─────┬────┘                  └──────┬───┘
+└────┬─────┘                       │                              │
+     │            P2P direct TCP (:9878, HMAC-authenticated)      │
+     └────────────◄═══════════════►┴◄════════════════════════════┘
+                   newline-delimited JSON, keepalive, auto-reconnect
+                   (falls back to server relay when unreachable)
+```
+
+**Key rules**
+
+1. The first message on any WebSocket connection must be
+   `{"type": "register", "agent_id": ..., "token": ..., "card": {...}}`.
+2. Same token = same network. Different tokens cannot see each other.
+3. Empty `target` = broadcast to every agent on the token.
+4. Messages are pushed in real time over the WebSocket — no polling needed.
+5. P2P is opportunistic: senders try the direct connection first and fall
+   back to server relay transparently.
+
+The full wire protocol is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md)
+and [docs/P2P_ARCHITECTURE.md](docs/P2P_ARCHITECTURE.md).
+
+---
+
+## Quick Start
+
+### 1. Run a server (development)
 
 ```bash
 git clone https://github.com/emarrero/agent-bus.git
 cd agent-bus
-pip install -e .
-pip install websockets   # required for WS mode
+pip install websockets
+
+python3 server/server_ws.py --ws-port 9876 --http-port 9877
 ```
 
-### 2. Start a server / Inicia un servidor
+Check it:
 
 ```bash
-python3 server_ws.py \
-  --ws-port 9876 --http-port 9877 --entry-token "my_stable_token"
+curl http://localhost:9877/health
+# {"status": "ok", "uptime": 3, "ws_connections": 0}
 ```
 
-The WebSocket server opens two ports:
-- **`:9876`** — agent WebSocket connections
-- **`:9877`** — HTTP API + live monitor at `/monitor`
+For a production server installed as a system service (LaunchDaemon/systemd),
+see [Server Configuration](#server-configuration).
 
-El servidor WebSocket abre dos puertos:
-- **`:9876`** — conexiones WebSocket de agentes
-- **`:9877`** — API HTTP + monitor en vivo en `/monitor`
-
-### 3. Connect your Hermes agent via gateway / Conecta vía gateway
-
-The **recommended** way to run an agent permanently is through the **Hermes gateway plugin** — it starts at boot, auto-reconnects, and doesn't require a running terminal.
-
-La forma **recomendada** de ejecutar un agente de forma permanente es a través del **plugin de gateway de Hermes** — arranca en boot, reconecta solo y no requiere terminal abierta.
+### 2. Connect a Hermes gateway (plugin)
 
 ```bash
-# Install the gateway plugin (once per machine)
-bash install.sh --token "my_secret_network" --server ws://SERVER_IP:9876
-
-# ⚠️  REQUIRED: disable Telegram code prompt in the gateway
-export AGENT_BUS_ALLOW_ALL=true
-# Or add to config.yaml: gateway.platforms.agentbus.extra.allow_all: true
-
-# Restart the gateway to apply
+cd agent-bus
+bash install.sh --token MY_SECRET --server ws://localhost:9876 --agent-id hermes
 hermes gateway restart
-hermes gateway status   # look for "agentbus 🤖 connected"
+hermes gateway status        # should show 🤖 AgentBus
 ```
 
-> **`AGENT_BUS_ALLOW_ALL=true` is mandatory.** Without it the gateway blocks
-> and waits for a Telegram verification code, keeping the agent offline.
->
-> **`AGENT_BUS_ALLOW_ALL=true` es obligatorio.** Sin él el gateway se bloquea
-> esperando un código de verificación de Telegram y el agente queda offline.
+See [Hermes Plugin Installation & Removal](#hermes-plugin-installation--removal)
+for the full guide.
 
-Your Hermes is now **alive on the bus** — persistent, auto-reconnecting, no terminal needed. 🎉
+### 3. Run a standalone node agent
 
-Tu Hermes ya está **vivo en el bus** — persistente, reconexión automática, sin terminal.
-
-#### Standalone mode (testing only) / Modo standalone (solo para pruebas)
-
-`node.py` is a lightweight alternative for testing or running a temporary agent. It does **not** integrate with the Hermes gateway and stops when the terminal closes.
-
-`node.py` es una alternativa ligera para pruebas o agentes temporales. **No** se integra con el gateway de Hermes y se detiene al cerrar el terminal.
+Any machine with Hermes can join the network as a named, LLM-backed agent:
 
 ```bash
-export AGENT_BUS_TOKEN="my_secret_network"
-export AGENT_BUS_SERVER="ws://localhost:9876"
-export AGENT_BUS_AGENT_ID="my-agent"
-
-python3 node.py
+PYTHONPATH=~/.hermes python3 ~/.hermes/agent_bus/node.py \
+  --agent-id oracle \
+  --name "Oracle" \
+  --skills "wisdom,philosophy,research" \
+  --token MY_SECRET \
+  --server ws://localhost:9876
 ```
 
-### 4. Chat from another terminal / Chatea desde otra terminal
+Or send a one-off message with the plain client (no LLM, no Hermes):
 
 ```bash
-export AGENT_BUS_TOKEN="my_secret_network"
-export AGENT_BUS_SERVER="ws://localhost:9876"
-
-# Register as a CLI user
-agent-bus register --name "Human Console" --skills terminal
-
-# Send a message to your agent
-agent-bus send --target "my-hermes" --message "Hello! What can you do?"
+AGENT_BUS_TOKEN=MY_SECRET AGENT_BUS_SERVER=ws://localhost:9876 \
+  python3 client/cli.py send --target oracle --message "Hello!"
 ```
 
 ---
 
-## 🧠 How It Works / Cómo Funciona
+## Hermes Plugin Installation & Removal
 
-```
-┌─────────────────────────────────────────────────┐
-│                    AgentBus                      │
-│  ┌─────────────┐    ┌─────────────┐             │
-│  │ Network A   │    │ Network B   │  ← tokens   │
-│  │ (private)   │    │ (private)   │    isolate   │
-│  └──────┬──────┘    └──────┬──────┘             │
-└─────────┼───────────────────┼────────────────────┘
-          │                   │
-     ┌────┴────┐         ┌───┴───┐
-     │ Agent A │         │Agent C│  ← WebSocket
-     │ token=A │         │token=B
-     └─────────┘         └───────┘
-     ┌─────────┐
-     │ Agent B │
-     │ token=A │
-     └─────────┘
-```
+The plugin connects the Hermes gateway to the bus **permanently** — like
+Telegram, always on, with auto-reconnect.
 
-**Each token defines a private network.** Agents sharing the same token see each other and communicate. Different tokens = complete isolation.
-
-**Cada token define una red privada.** Agentes con el mismo token se ven y se comunican. Tokens diferentes = aislamiento total.
-
-### Agent Identity / Identidad del Agente
-
-Every agent registers with an **AgentCard** — a profile that includes:
-
-| Field / Campo | Description / Descripción |
-|---|---|
-| `agent_id` | Unique ID / ID único |
-| `name` | Human-readable name / Nombre legible |
-| `skills` | Comma-separated abilities / Habilidades separadas por coma |
-| `system` | Optional system prompt / System prompt opcional |
-
-Agents are discoverable by **name alias** too — you can target `"my-agent"` by name instead of its full agent_id.
-
-Los agentes se pueden encontrar por **nombre alias** — puedes enviar por nombre sin conocer el agent_id exacto.
-
----
-
-## 🚀 Server Setup / Configuración del Servidor
-
-### Quick Server (no dependencies)
+### Option A — `install.sh` (from a cloned repo)
 
 ```bash
-# HTTP-only server — pure stdlib, zero deps
-python3 server.py --port 9876
+git clone https://github.com/emarrero/agent-bus.git
+cd agent-bus
+bash install.sh \
+  --token  <shared-network-token> \
+  --server ws://<server-host>:9876 \
+  --agent-id <my-agent-id>
+
+hermes gateway restart
 ```
 
-### Full WebSocket Server (recommended)
+What it does:
+
+1. Syncs the library files (flat) into `~/.hermes/agent_bus/`.
+2. Installs the plugin (`__init__.py`, `adapter.py`, `plugin.yaml`, `p2p.py`)
+   into `~/.hermes/plugins/agentbus/`.
+3. Adds `agentbus` to `plugins.enabled` and writes the
+   `gateway.platforms.agentbus` block into `~/.hermes/config.yaml`.
+4. Adds `AGENT_BUS_*` env vars to your shell rc (informational — the gateway
+   reads **config.yaml**, see the warning below).
+5. Verifies the bus server is reachable.
+
+Useful flags: `--dry-run` (show changes without applying), `--no-sync`
+(skip the module sync), `--uninstall`.
+
+> ⚠️ **Token and server must live in `config.yaml`** under
+> `gateway.platforms.agentbus.extra` — the gateway runs under launchd/systemd
+> and does **not** read `~/.zshrc`. Env vars alone produce
+> `requirements not met`.
+
+### Option B — `hermes plugins install` (no clone needed)
 
 ```bash
-python3 server_ws.py \
-  --ws-port 9876 \
-  --http-port 9877 \
-  --entry-token "my_canonical_network_token"
+hermes plugins install emarrero/agent-bus
+hermes gateway restart
 ```
 
-| Parameter / Parámetro | Default / Defecto | Purpose / Propósito |
+This clones the repository into `~/.hermes/plugins/agent-bus/`; the loader
+finds the manifest at `plugin/plugin.yaml` and the adapter loads
+`client/p2p.py` from the cloned tree automatically (zero configuration).
+
+You still need the platform config in `~/.hermes/config.yaml`:
+
+```yaml
+plugins:
+  enabled:
+    - agentbus
+
+gateway:
+  platforms:
+    agentbus:
+      enabled: true
+      extra:
+        token: <shared-network-token>
+        server: ws://<server-host>:9876
+        agent_id: <my-agent-id>
+        allow_all: true          # skip per-agent pairing (trusted networks)
+        p2p_port: 9878           # optional; 0 disables P2P
+        skills:
+          - assistant
+          - research
+```
+
+### Authorizing agents (pairing)
+
+With `allow_all` **off**, an unknown agent that messages your gateway gets a
+pairing code instead of a reply. Approve it once:
+
+```bash
+hermes pairing approve agentbus <CODE>
+```
+
+This is expected security behaviour, not a bug.
+
+### Removal
+
+Any of the three:
+
+```bash
+# 1. From a cloned repo — removes plugin dir + config.yaml entries
+bash install.sh --uninstall
+
+# 2. Via the Hermes plugin manager (if installed with Option B)
+hermes plugins remove agent-bus
+
+# 3. Manual
+rm -rf ~/.hermes/plugins/agentbus          # or plugins/agent-bus for Option B
+#   then delete "- agentbus" from plugins.enabled and the
+#   gateway.platforms.agentbus block in ~/.hermes/config.yaml
+hermes gateway restart
+```
+
+`install.sh --uninstall` intentionally leaves `~/.hermes/agent_bus/` in place
+(other tools may import it); remove it manually if unwanted.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
 |---|---|---|
-| `--ws-host` | `0.0.0.0` | WebSocket bind address |
-| `--ws-port` | `9876` | WebSocket port |
-| `--http-port` | `9877` | HTTP API + monitor port |
-| `--entry-token` | *(none)* | Stable "door" token — all agents converge on a derived `channel_hash`; supports rolling |
+| `requirements not met` on gateway start | Token/server only in shell env; launchd doesn't read `~/.zshrc` | Put `token`/`server` in `config.yaml` under `gateway.platforms.agentbus.extra` |
+| AgentBus missing from `hermes gateway status` | Plugin not enabled or `__init__.py` missing | Check `plugins.enabled` has `agentbus`; re-run `install.sh` |
+| `Missing 'websockets' package` | Dependency not in the gateway venv | `pip install websockets httpx` in the Hermes venv |
+| Replies are a pairing code, not an answer | Unknown agent, pairing required | `hermes pairing approve agentbus <CODE>` or set `allow_all: true` |
+| All messages relayed, no P2P (`route to X: relay` in logs) | Peer unreachable on its P2P port, or `p2p.py` missing from the plugin dir | Check `nc -z <peer-ip> 9878`; re-run `install.sh`; watch `gateway.platforms.agentbus.p2p` log lines |
+| `Registration failed` | Wrong/empty token | Same token on every agent; check `/health` and the server logs |
+| Agents can't see each other | Different tokens = different networks | Use the exact same token everywhere |
 
-### Production with systemd
+---
 
-```ini
-[Unit]
-Description=AgentBus WebSocket Server
-Documentation=https://github.com/emarrero/agent-bus
-After=network-online.target
-Wants=network-online.target
+## CLI Reference
 
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/opt/agentbus
+`client/cli.py` (installed as `agent-bus` via pip, or run directly). Global
+options: `--agent-id/-a`, `--server`, `--token` (each falls back to the
+matching `AGENT_BUS_*` env var).
 
-ExecStart=/opt/agentbus/venv/bin/python3 /opt/agentbus/agent_bus/server_ws.py \
-    --ws-port 9876 \
-    --http-port 9877 \
-    --entry-token "my_stable_token"
-
-Environment=PYTHONPATH=/opt/agentbus
-Environment=PYTHONUNBUFFERED=1
-
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Or use the installer script (recommended):
+| Command | Description | Key options |
+|---|---|---|
+| `register` | Register this agent on the network | `--name`, `--skills`, `--description`, `--modalities` |
+| `send` | Send a message | `--target/-t` (or `broadcast`), `--message/-m` |
+| `read` | Read recent messages | `--limit/-l` |
+| `listen` | Block until one message arrives | `--timeout` |
+| `peers` | List agents on the network | |
+| `task` | Delegate a task to another agent | `--target`, `--goal/-g`, `--context/-c`, `--toolsets` |
+| `claim` | Claim the next pending task addressed to me | |
+| `complete` | Report a task result | `--task-id`, `--result`, `--error` |
+| `health` | Check server connectivity | |
+| `stats` | Server statistics | |
 
 ```bash
-sudo bash install-server.sh \
-  --ws-port 9876 \
-  --http-port 9877 \
-  --entry-token "my_stable_token"
+export AGENT_BUS_TOKEN=MY_SECRET
+export AGENT_BUS_SERVER=ws://localhost:9876
+
+python3 client/cli.py register --name "Sales Agent" --skills sales,crm
+python3 client/cli.py send -t oracle -m "Any updates?"
+python3 client/cli.py task -t oracle -g "Summarize today's messages"
+python3 client/cli.py peers
 ```
 
 ---
 
-## 🔧 CLI Usage / Uso del CLI
+## Python Client Library
 
-```text
-agent-bus register    Register your agent on the network / Registrar agente
-agent-bus send        Send a message / Enviar mensaje
-agent-bus read        Read incoming messages / Leer mensajes
-agent-bus task        Delegate a task / Delegar tarea
-agent-bus claim       Pick the next pending task / Tomar tarea pendiente
-agent-bus complete    Mark task as done / Completar tarea
-agent-bus peers       List connected agents / Listar agentes conectados
-agent-bus listen      Real-time message listener (WS) / Escuchar en tiempo real
-agent-bus health      Health check / Verificar servidor
-agent-bus stats       Server statistics / Estadísticas
-```
+### WebSocket client (real-time, recommended)
 
-### Examples / Ejemplos
-
-```bash
-# Register with specific skills / Registrar con habilidades
-agent-bus register --name "Translator" --skills translation,writing
-
-# Delegate a task / Delegar una tarea
-agent-bus task --target "investigador" --goal "Research transformer models"
-
-# Listen for messages (loop mode) / Escuchar mensajes
-while true; do
-  msg=$(agent-bus listen --timeout 30)
-  echo "Received: $msg"
-done
-```
-
----
-
-## 📦 Python Library / Librería Python
-
-### HTTP Client (polling)
-
-```python
-from agent_bus.client import AgentBusClient
-
-agent = AgentBusClient(
-    agent_id="my_agent",
-    token="my_secret_network",
-    server_url="http://localhost:9876",
-)
-agent.register(skills=["research", "writing"])
-
-# Send / Enviar
-agent.send_text("Hello from Python!", target="other_agent")
-
-# Read / Leer
-messages = agent.poll(limit=10)
-for msg in messages:
-    print(f"{msg.source}: {msg.payload}")
-```
-
-### WebSocket Client (real-time)
+`client/hermes_agent.py` — `HermesBusConnection` via the `connect_to_bus()`
+helper. Deployed installs import it as `agent_bus.hermes_agent`:
 
 ```python
 import asyncio
+import sys
+sys.path.insert(0, "/path/to/.hermes")          # deployed flat package
 from agent_bus.hermes_agent import connect_to_bus
 
 async def main():
     bus = await connect_to_bus(
-        agent_id="my_agent",
-        token="my_secret_network",
+        agent_id="my-agent",
+        token="MY_SECRET",
         server="ws://localhost:9876",
-        skills=["research"],
+        name="My Agent",
+        skills=["analysis", "code"],
     )
-    async for event in bus.messages():
-        if event["type"] == "new_message":
-            msg = event["message"]
-            print(f"{msg['source']}: {msg['payload']}")
-            await bus.send_message("Got it!", target=msg["source"])
+
+    await bus.send_message("Hello!", target="oracle")     # "" = broadcast
+
+    task_id = await bus.delegate_task(
+        goal="Research recent papers on multi-agent systems",
+        context="Practical coordination patterns only.",
+        target="oracle",
+    )
+
+    async for msg in bus.messages():                      # real-time push
+        if msg["type"] == "new_message":
+            m = msg["message"]
+            print(f"[{m['source']}] {m['payload']}")
+            await bus.send_message("Got it.", target=m["source"])
+
+    await bus.disconnect()
 
 asyncio.run(main())
 ```
 
----
+Other methods: `wait_for_message(...)`, `claim_task()`,
+`complete_task(task_id, result)`, `ping()`.
 
-## 🌐 Web Monitor
+### HTTP client (polling, no websockets dependency)
 
-When using `server_ws.py`, the HTTP port (`:9877`) serves:
+`client/client.py` — `AgentBusClient`, synchronous, stdlib-only:
 
-| Endpoint | Description / Descripción |
-|---|---|
-| `/monitor` | Real-time Wireshark-style dashboard / Dashboard Wireshark en vivo |
-| `/flow` | Event history JSON (`?token=`, `?kind=`, `?limit=`) |
-| `/flow/stream` | Server-Sent Events live stream / Stream SSE en vivo |
-| `/health` | Health check / Verificación de salud |
-| `/stats` | Server statistics / Estadísticas |
-| `/agents` | Agent list for a token / Lista de agentes por token |
-| `/kick` | Force-disconnect one agent / Desconectar un agente |
-| `/purge` | Disconnect all agents on a channel / Desconectar todos |
-| `/roll` | Roll channel hash + kick all agents / Rotar canal + expulsar todos |
+```python
+from agent_bus.client import AgentBusClient
 
----
+c = AgentBusClient(agent_id="poller", token="MY_SECRET",
+                   server="http://localhost:9877")
+c.register(name="Poller", skills=["batch"])
+c.send_text("Hello via HTTP", target="oracle")
+for msg in c.poll(limit=20):
+    print(msg.source, msg.payload)
+```
 
-## 🔐 Networks & Tokens / Redes y Tokens
-
-The token is your **isolation layer**. Agents with the same token share a private network:
+### One-off message via raw HTTP
 
 ```bash
-# Sales network — agents only see each other
-AGENT_BUS_TOKEN="sales" agent-bus register --name "Sales Agent"
-
-# Support network — completely isolated from sales
-AGENT_BUS_TOKEN="support" agent-bus register --name "Support Agent"
-```
-
-### Token Rolling (Channel Hash)
-
-When running with `--entry-token`, the server operates in **rolling mode**:
-
-- The `entry_token` acts as a stable "door" — it never changes and is safe to share.
-- On startup, the server derives an internal `channel_hash = sha256(entry_token + ":0")[:32]`.
-- Any agent connecting with the `entry_token` (or an old `channel_hash`) receives a `channel_redirect` pointing to the current `channel_hash`.
-
-```
-entry_token (stable, public)
-     │
-     ▼  SHA-256 derivation
-channel_hash (active, changes on roll)
-     │
-     ▼  all agents converge here
-[Network]
-```
-
-```bash
-# Start server with rolling enabled
-python3 server_ws.py --entry-token "my_stable_token"
-
-# All clients just use the entry_token — redirects happen automatically
-export AGENT_BUS_TOKEN="my_stable_token"
-python3 node.py  # ← receives channel_redirect, follows automatically
-```
-
-**Rolling the channel** breaks stuck or looping agents out of a channel:
-
-```bash
-# Trigger a channel roll (kicks all agents, generates new channel_hash)
-curl -X POST http://localhost:9877/roll \
+curl -X POST http://localhost:9877/message \
   -H "Content-Type: application/json" \
-  -d '{"token": "my_stable_token"}'
-# → {"status": "ok", "channel_hash": "05d5e4a1df08…", "kicked": 3}
+  -d '{"token": "MY_SECRET",
+       "message": {"type": "text", "source": "curl",
+                   "target": "oracle", "payload": "Hello!"}}'
 ```
 
-After rolling:
-- All connected agents are kicked — they auto-reconnect via their `actual_token`
-- Their old `channel_hash` no longer matches → server sends `channel_redirect` → they converge on the new hash
-- New agents arriving with the original `entry_token` also get redirected to the new hash
-
-The client (`HermesBusConnection.connect()`) handles redirects automatically:
-1. Receives `channel_redirect`
-2. Closes current connection
-3. Updates its internal token to the new `channel_hash`
-4. Reconnects (up to 3 retries)
-5. `node.py` persists the corrected token so future reconnections follow the latest roll
-
 ---
 
-**Flujo del rolling de canal / Canal hash rolling flow**
+## Environment Variables
 
-Cuando se usa `--entry-token`, el servidor opera en **modo rolling**:
+Config precedence for the gateway plugin: `config.yaml` `extra:` keys
+override env vars; env vars are the fallback (and the primary mechanism for
+the CLI and node).
 
-- El `entry_token` es la "puerta" estable y pública.
-- Al iniciar, se deriva `channel_hash = sha256(entry_token + ":0")[:32]`.
-- Agentes que se conectan con `entry_token` o un `channel_hash` viejo reciben `channel_redirect` al hash activo.
-- `POST /roll` genera un nuevo hash, expulsa todos los agentes y los redirige al nuevo canal.
-
-Los agentes reconectan solos — `node.py` persiste el token correcto entre reconexiones.
-
----
-
-## 📋 HTTP API Reference / Referencia API HTTP
-
-| Method / Método | Endpoint | Purpose / Propósito |
+| Variable | Used by | Description |
 |---|---|---|
-| POST | `/register` | Register an agent / Registrar agente |
-| POST | `/unregister` | Unregister / Dar de baja |
-| POST | `/message` | Send message / Enviar mensaje |
-| GET | `/messages` | Read messages (`?agent_id=ID&limit=N`) |
-| POST | `/task` | Delegate task / Delegar tarea |
-| GET | `/task` | Claim (`?agent_id=ID`) or query (`?task_id=ID`) |
-| POST | `/task/complete` | Complete a task / Completar tarea |
-| GET | `/agents` | List agents / Listar agentes |
-| POST | `/kick` | Force-disconnect one agent (auto-reconnects) / Desconectar un agente |
-| POST | `/purge` | Force-disconnect ALL agents / Desconectar todos los agentes |
-| POST | `/roll` | Roll the channel: new hash + kick all agents / Nuevo hash + expulsar todos |
-| GET | `/flow` | Event history JSON (`?token=&kind=&limit=`) |
-| GET | `/flow/stream` | Live SSE stream (Wireshark-style) / Stream en vivo |
-| GET | `/health` | Health check |
-| GET | `/stats` | Server statistics / Estadísticas |
-| GET | `/monitor` | Live web dashboard / Dashboard web en vivo |
+| `AGENT_BUS_TOKEN` | all | Shared network token (defines the private network) |
+| `AGENT_BUS_SERVER` | all | WebSocket server URL (e.g. `ws://host:9876`) |
+| `AGENT_BUS_AGENT_ID` | all | This agent's unique ID |
+| `AGENT_BUS_NAME` | gateway, node | Human-readable display name |
+| `AGENT_BUS_SKILLS` | gateway, node | Comma-separated skill list |
+| `AGENT_BUS_P2P_PORT` | gateway | P2P listener port (default `9878`, `0` = disabled) |
+| `AGENT_BUS_HTTP_PORT` | gateway | Server HTTP API port (default `9877`) |
+| `AGENT_BUS_ALLOW_ALL_USERS` | gateway | `true` = accept messages from any agent without pairing |
+| `AGENT_BUS_ALLOWED_USERS` | gateway | Comma-separated allowlist of agent IDs |
+| `AGENT_BUS_HOME_AGENT` | gateway | Default target for cron-delivered messages |
+| `AGENT_BUS_TOOLS` | node | Hermes toolsets (`messaging`, `web`, `memory`) |
+| `AGENT_BUS_SYSTEM` | node | Custom system prompt |
 
-All endpoints require header `X-Agent-Token: <token>` or query param `?token=`.
+> **Naming fix (0.8.0):** earlier docs referred to `AGENT_BUS_ALLOW_ALL`.
+> The adapter actually reads **`AGENT_BUS_ALLOW_ALL_USERS`** (env) or
+> `allow_all: true` under `gateway.platforms.agentbus.extra` (config.yaml).
+> `AGENT_BUS_ALLOW_ALL` was never read by any code.
 
-Todos los endpoints requieren el header `X-Agent-Token: <token>` o query param `?token=`.
+> Reminder: the gateway itself only reliably sees `config.yaml` — use env
+> vars for the CLI, node, and scripts.
 
 ---
 
-## 🔌 WebSocket Protocol / Protocolo WebSocket
+## P2P Direct Connections
 
-### Connect / Conectar
+Like Tailscale for your agents: the server coordinates, traffic goes direct.
 
-```json
-{"type": "register", "agent_id": "my_agent", "token": "my_token", "card": {"name": "My Agent", "skills": ["research"]}}
+**How it works**
+
+1. Each agent opens a P2P TCP listener (default `9878`; busy ports scan
+   upward automatically, and the *actually bound* port is advertised).
+2. `GET /discover` on the server's HTTP API returns every live peer's IP and
+   P2P port.
+3. Agents dial each other and run an **HMAC-SHA256 challenge–response
+   handshake** keyed by the shared bus token (mutual auth, per-connection
+   nonces, the token never crosses the wire).
+4. Messages flow as newline-delimited JSON. Keepalive pings every 20 s evict
+   dead peers; a 30 s reconnect loop redials known peers; the peer table
+   refreshes from `/discover` every 60 s.
+5. `send()` prefers the direct connection and silently falls back to server
+   relay (NAT, firewall, peer offline). The gateway logs the route per peer:
+   `route to oracle: p2p`.
+
+**Check P2P status**
+
+```bash
+nc -z -w2 <peer-ip> 9878 && echo "P2P listener active"
+
+curl -s -H "X-Agent-Token: MY_SECRET" http://<server>:9877/discover | python3 -m json.tool
 ```
 
-### Server → Agent Events / Eventos del servidor al agente
+**Configuration:** `p2p_port` in `config.yaml` `extra` (or
+`AGENT_BUS_P2P_PORT`). `0` disables P2P entirely (relay-only).
 
-| Type / Tipo | Description / Descripción |
-|---|---|
-| `new_message` | New message from another agent |
-| `agent_joined` | An agent connected |
-| `agent_left` | An agent disconnected |
-| `agents_list` | Current agent roster |
-| `task_completed` | Delegated task is done |
-| `task_ack` | Task received confirmation |
-| `message_ack` | Message received confirmation |
-| `channel_redirect` | Canonical channel redirect (includes corrected `token`) |
-| `pong` | Ping response |
-
-### Agent → Server / Agente al servidor
-
-| Type / Tipo | Description / Descripción |
-|---|---|
-| `message` | Send message to another agent |
-| `task` | Delegate a task |
-| `task_complete` | Mark task completed |
-| `claim_task` | Claim next pending task |
-| `ping` | Keepalive |
+Protocol details: [docs/P2P_ARCHITECTURE.md](docs/P2P_ARCHITECTURE.md) ·
+Debugging: [docs/P2P_TROUBLESHOOTING.md](docs/P2P_TROUBLESHOOTING.md)
 
 ---
 
-## 📁 Project Structure / Estructura del Proyecto
+## Server Configuration
+
+### Development
+
+```bash
+python3 server/server_ws.py [--ws-host 0.0.0.0] [--ws-port 9876] [--http-port 9877]
+```
+
+### Production (system service)
+
+```bash
+sudo bash scripts/install-server.sh --ws-port 9876 --http-port 9877
+```
+
+Installs the server under `/opt/agentbus`, creates a LaunchDaemon (macOS) or
+systemd unit (Linux) that starts at boot, and writes logs to
+`/var/log/agentbus/`. Other flags: `--user`, `--install-dir`, `--python`,
+`--log-dir`, `--entry-token`, `--uninstall`, `--dry-run`.
+
+### Token rolling (optional)
+
+Start with `--entry-token TOKEN --rolling-channel` to enable hashed channel
+redirects: agents register with the stable entry token and are redirected to
+a derived channel hash; `POST /roll` rotates the channel without changing the
+entry token.
+
+### HTTP API (port 9877)
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Liveness + uptime + connection count |
+| `/stats` | GET | Per-network statistics |
+| `/agents` | GET | Registered agents (token required) |
+| `/discover` | GET | P2P routing table — **live agents only** |
+| `/messages` | GET | Message history (`agent_id`, `since`, `limit`) |
+| `/message` | POST | Send a one-off message |
+| `/register` / `/unregister` | POST | HTTP registration |
+| `/task`, `/task/complete` | POST/GET | Task delegation |
+| `/monitor` | GET | Live HTML dashboard (message flow, agents) |
+| `/roll`, `/kick`, `/purge` | POST | Network administration |
+
+Token goes in the `X-Agent-Token` header or `?token=` query parameter.
+
+---
+
+## Node Agent (node.py)
+
+`client/node.py` turns any Hermes machine into a named, LLM-backed agent that
+answers bus messages — conversation memory included.
+
+```bash
+# Default identity (hostname as agent ID), text-only replies
+PYTHONPATH=~/.hermes python3 ~/.hermes/agent_bus/node.py
+
+# Named agent with Telegram/platform access
+PYTHONPATH=~/.hermes python3 ~/.hermes/agent_bus/node.py \
+  --agent-id oracle --name "Oracle" \
+  --skills "wisdom,philosophy,research" \
+  --tools messaging
+
+# Full tool access
+PYTHONPATH=~/.hermes python3 ~/.hermes/agent_bus/node.py \
+  --agent-id oracle --tools messaging,web,memory
+
+# Local dev server
+python3 client/node.py --local
+```
+
+| `--tools` value | What it enables |
+|---|---|
+| `""` (default) | Text-only replies — fast, isolated, no side effects |
+| `messaging` | Can send via Telegram, WhatsApp, etc. |
+| `messaging,web` | + web search |
+| `messaging,web,memory` | + Hermes long-term memory toolset |
+
+**Conversational memory is on by default** — the node keeps a separate Hermes
+session per peer, so each conversation thread has continuity (disable with
+`--no-memory`). Other flags: `--system` (custom prompt), `--max-turns`,
+`--dry-run`. Every flag has an `AGENT_BUS_*` env-var equivalent (see
+[Environment Variables](#environment-variables)).
+
+Updating a deployed node: [docs/ORACLE_UPDATE.md](docs/ORACLE_UPDATE.md).
+
+---
+
+## Repository Layout
 
 ```
 agent-bus/
-├── __init__.py         # Package version / Versión del paquete
-├── __main__.py         # Entry point
-├── server.py           # HTTP server (stdlib, no deps)
-├── server_ws.py        # WebSocket + HTTP + monitor server
-├── client.py           # Unified Python client (HTTP + local)
-├── hermes_agent.py     # WebSocket connection for Hermes agents
-├── node.py             # Run Hermes as a permanent agent on the bus
-├── bus.py              # MessageBus with SQLite (local mode)
-├── protocol.py         # Protocol: AgentCard, Message, Task
-├── router.py           # Intelligent message routing
-├── cli.py              # CLI: register, send, read, task, etc.
-├── multimodal.py       # STT/TTS multimodal layer
-├── scripts/            # Utility scripts / Scripts útiles
-└── README.md           # This file / Este archivo
+├── server/                  # Central server
+│   ├── server_ws.py         #   WebSocket + HTTP server (the real one)
+│   ├── server.py            #   Core registry/bus (+ legacy HTTP-only server)
+│   ├── protocol.py          #   AgentCard, Message, TaskRequest types
+│   ├── bus.py               #   SQLite message bus (local mode)
+│   └── router.py            #   Skill-based message routing
+├── client/                  # Client-side code
+│   ├── hermes_agent.py      #   Real-time WS client (connect_to_bus)
+│   ├── client.py            #   HTTP polling client
+│   ├── p2p.py               #   P2PManager — direct connections
+│   ├── cli.py               #   `agent-bus` command-line tool
+│   └── node.py              #   Standalone LLM-backed agent runner
+├── plugin/                  # Hermes gateway plugin
+│   ├── __init__.py          #   Plugin entry point (register)
+│   ├── adapter.py           #   AgentBusAdapter (platform adapter)
+│   └── plugin.yaml          #   Plugin manifest
+├── docs/                    # Protocol & operations docs
+├── scripts/
+│   └── install-server.sh    # Server-as-a-service installer
+├── tests/                   # Test suite (python3 tests/test_p2p.py)
+└── install.sh               # Hermes client/plugin installer
 ```
 
----
+> **Deployment note:** installers copy these files **flat** into
+> `~/.hermes/agent_bus/` (clients) and `/opt/agentbus/agent_bus/` (server),
+> so deployed imports remain `agent_bus.<module>` regardless of the repo
+> layout. All modules use zero-config imports and work from either layout.
 
-## 🧪 Environment Variables / Variables de Entorno
-
-| Variable | Used By / Usado por | Description / Descripción |
-|---|---|---|
-| `AGENT_BUS_TOKEN` | All / Todos | Shared network token (entry_token) / Token de red compartido |
-| `AGENT_BUS_SERVER` | Clients | Server WS URL / URL del servidor WS |
-| `AGENT_BUS_AGENT_ID` | Clients | Agent unique ID / ID único del agente |
-| `AGENT_BUS_NAME` | Node / Gateway | Display name / Nombre visible |
-| `AGENT_BUS_SKILLS` | Node / Gateway | Comma-separated skills / Habilidades |
-| `AGENT_BUS_TOOLS` | Node | Hermes toolsets |
-| `AGENT_BUS_SYSTEM` | Node | Custom system prompt / System prompt personalizado |
-| `AGENT_BUS_ALLOW_ALL` | **Gateway** | **Required** — bypasses Telegram verification prompt. Without this, the gateway blocks waiting for a Telegram code. / **Obligatorio** — evita el prompt de verificación de Telegram. Sin esto el gateway queda bloqueado. |
-| `AGENT_BUS_P2P_PORT` | Gateway / Node | Port for direct P2P connections (default: 9878, 0 = disabled) |
-
----
-
-## 🔗 Direct P2P Connections (Agent-to-Agent)
-
-AgentBus now supports **direct peer-to-peer connections** — like Tailscale for your agents.
-
-Instead of all messages going through the central server, agents discover each other via `GET /discover` and establish direct TCP connections. Messages travel **agent-to-agent** with zero server involvement. If a direct connection isn't possible (NAT, firewall), the system falls back to the server relay automatically — no message is ever lost.
-
-```
-┌──────────────┐     1. Register (p2p_port: 9878)     ┌──────────────┐
-│   Server     │◄─────────────────────────────────────│   Faye       │
-│ (discovery)  │──2. /discover → peer table ──────────→│  (:9878)     │
-└──────────────┘                                       └──────┬───────┘
-                                                              │
-                                                   3. Direct TCP connect
-                                                              │
-                                                         ┌────▼───────┐
-                                                         │   Oracle   │
-                                                         │  (:9878)   │
-                                                         └────────────┘
-```
-
-### Benefits
-
-- **Lower latency** — messages go direct, skipping the server hop
-- **No central bottleneck** — server handles O(agents), not O(messages)
-- **Resilient** — existing P2P conversations survive server restarts
-- **Graceful fallback** — if P2P fails, messages route through the server as before
-
-### Configuration
-
-```yaml
-# Hermes gateway config.yaml
-gateway:
-  platforms:
-    agentbus:
-      extra:
-        p2p_port: 9878
-```
-
-Or via environment: `export AGENT_BUS_P2P_PORT=9878`
-
-Default is `9878`. Set to `0` to disable P2P (relay-only mode).
-
-Full protocol details: [P2P_ARCHITECTURE.md](./P2P_ARCHITECTURE.md)
-
----
-
-## 🐛 Troubleshooting / Solución de Problemas
-
-| Problem / Problema | Fix / Solución |
-|---|---|
-| Gateway blocks / waits for Telegram code | Set `AGENT_BUS_ALLOW_ALL=true` — the gateway uses this to skip phone verification. Add to systemd env or `config.yaml` extra. / El gateway usa esto para evitar verificación de Telegram |
-| `ModuleNotFoundError: No module named 'agent_bus'` | `pip install -e .` or `export PYTHONPATH="$HOME/agent-bus:$PYTHONPATH"` |
-| `websockets required` | `pip install websockets` |
-| `Connection refused` | Is the server running? / ¿El servidor está corriendo? `agent-bus health` or `curl http://localhost:9877/health` |
-| Agents can't see each other / No se ven | Check same **token** and same **server** URL / Verifica mismo **token** y misma URL de **servidor**. Use `agent-bus peers` |
-| Messages not reaching agents | Agents are identified by `agent_id` OR by `name` — use `agent-bus peers` to see connected names / Los agentes se identifican por `agent_id` O por `name` |
-| Agents stuck in a loop / Agentes en bucle | 1. Monitor loop at `/monitor`. 2. `POST /kick` the looping agent. 3. If persists, `POST /roll` to move all agents to a fresh channel |
-| Agent connects but gets `channel_redirect` | Expected — the server is running with `--entry-token` and the agent token doesn't match the current `channel_hash`. The client follows automatically. / Esperado — el servidor usa `--entry-token` y el cliente actualiza el token solo |
-| After `/roll`, agents don't rejoin | Agents need `auto-reconnect` logic (built into `node.py`). Raw WS clients must handle close code `1000` and reconnect. / Los agentes necesitan lógica de reconexión automática |
-
----
-
-## 📄 License / Licencia
+## License
 
 MIT
-
----
-
-## 🤝 Contributing / Contribuir
-
-PRs welcome! Keep the bilingual spirit — every feature or fix should be documented in English + Spanish.
-
-¡PRs bienvenidos! Mantén el espíritu bilingüe — cada característica o arreglo debe documentarse en inglés + español.

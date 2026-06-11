@@ -37,7 +37,23 @@ import logging
 import time
 from typing import Any
 
-from agent_bus.server import AgentBusServer, TokenNetwork
+# ── Zero-config import (same strategy as the P2P loader): works as a
+# package module (deployed flat as ``agent_bus.server_ws``) and as a
+# plain script (``python3 server/server_ws.py``) with no PYTHONPATH.
+try:
+    from .server import AgentBusServer, TokenNetwork  # type: ignore[import]
+except ImportError:
+    import importlib.util as _ilu
+    import os as _os
+    import sys as _sys
+
+    _path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "server.py")
+    _spec = _ilu.spec_from_file_location("_agentbus_server_core", _path)
+    _mod = _ilu.module_from_spec(_spec)
+    _sys.modules["_agentbus_server_core"] = _mod
+    _spec.loader.exec_module(_mod)
+    AgentBusServer = _mod.AgentBusServer
+    TokenNetwork = _mod.TokenNetwork
 
 logging.basicConfig(level=logging.INFO, format="[AgentBus-WS] %(message)s")
 log = logging.getLogger(__name__)

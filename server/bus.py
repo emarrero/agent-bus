@@ -17,14 +17,30 @@ import time
 from datetime import datetime
 from typing import Callable
 
-from .protocol import (
-    AgentCard,
-    Message,
-    MessageType,
-    TaskRequest,
-    TaskResponse,
-    TaskStatus,
-)
+# Zero-config import: package-relative when loaded as part of a package,
+# sibling-file load when executed without package context.
+try:
+    from .protocol import (
+        AgentCard,
+        Message,
+        MessageType,
+        TaskRequest,
+        TaskResponse,
+        TaskStatus,
+    )
+except ImportError:
+    import importlib.util as _ilu
+    import sys as _sys
+
+    _path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "protocol.py")
+    _spec = _ilu.spec_from_file_location("_agentbus_protocol", _path)
+    _mod = _sys.modules.get("_agentbus_protocol")
+    if _mod is None:
+        _mod = _ilu.module_from_spec(_spec)
+        _sys.modules["_agentbus_protocol"] = _mod
+        _spec.loader.exec_module(_mod)
+    AgentCard, Message, MessageType = _mod.AgentCard, _mod.Message, _mod.MessageType
+    TaskRequest, TaskResponse, TaskStatus = _mod.TaskRequest, _mod.TaskResponse, _mod.TaskStatus
 
 
 class MessageBus:
