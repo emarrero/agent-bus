@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
+import re
+from pathlib import Path
 from setuptools import setup
+
+# Single source of truth: __init__.py
+init = Path(__file__).parent / "__init__.py"
+version = re.search(
+    r'__version__\s*=\s*"([^"]+)"',
+    init.read_text(encoding="utf-8"),
+).group(1)
 
 setup(
     name="agent_bus",
-    version="0.4.0",
+    version=version,
     description="Multi-agent communication network for AI agents",
     long_description=open("README.md", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
