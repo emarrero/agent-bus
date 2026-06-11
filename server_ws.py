@@ -804,11 +804,20 @@ class HTTPHealthHandler:
                 result = bus.handle_list_agents(token)
 
             elif path == "/discover" and token:
-                """Return P2P routing table: agent_id → ip, p2p_port, name."""
+                """Return P2P routing table: agent_id → ip, p2p_port, name.
+
+                Only agents with a LIVE WebSocket connection are listed:
+                the registry may still hold cards for agents registered via
+                HTTP /register or whose disconnect cleanup raced, and
+                advertising those makes every peer dial dead addresses.
+                """
                 agents = bus.handle_list_agents(token).get("agents", [])
+                live = set(self.ws_server.connections.get(token, {}).keys())
                 p2p_table = {}
                 for agent in agents:
                     aid = agent.get("agent_id", "")
+                    if aid not in live:
+                        continue
                     p2p_table[aid] = {
                         "name": agent.get("name", aid),
                         "ip": agent.get("p2p_ip", agent.get("ip", "")),

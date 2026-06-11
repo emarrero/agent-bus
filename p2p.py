@@ -101,6 +101,9 @@ class P2PManager:
         # Peers with a dial in progress (avoid duplicate connect tasks)
         self._connecting: set[str] = set()
 
+        # Consecutive dial failures per peer (log throttling)
+        self._dial_failures: dict[str, int] = {}
+
         # P2P listener server
         self._server: asyncio.Server | None = None
 
@@ -244,6 +247,12 @@ class P2PManager:
         """
         peers = discover_data.get("peers", {})
 
+        # Prune peers that are no longer advertised so the reconnect loop
+        # stops redialing agents that left the network.
+        for stale in [pid for pid in self._known_addrs if pid not in peers]:
+            self._known_addrs.pop(stale, None)
+
+        dialing: list[str] = []
         for peer_id, info in peers.items():
             if peer_id == self.agent_id:
                 continue  # Skip self
@@ -264,7 +273,22 @@ class P2PManager:
                     self._peers[peer_id].port = p2p_port
                     continue
 
+            dialing.append(f"{peer_id}@{ip}:{p2p_port}")
             self._spawn_connect(peer_id, ip, p2p_port)
+
+        logger.info("📋 update_peers: %d advertised, %d connected, dialing [%s]",
+                    sum(1 for p in peers if p != self.agent_id),
+                    len(self._peers),
+                    ", ".join(dialing) or "none")
+
+    async def forget_peer(self, peer_id: str) -> None:
+        """Drop the connection to a peer and stop redialing it (agent left)."""
+        self._known_addrs.pop(peer_id, None)
+        self._dial_failures.pop(peer_id, None)
+        async with self._lock:
+            peer = self._peers.get(peer_id)
+        if peer:
+            await self._drop_peer(peer, "agent left the network")
 
     def _spawn_connect(self, peer_id: str, ip: str, port: int) -> None:
         if peer_id in self._connecting:
@@ -348,19 +372,29 @@ class P2PManager:
                 name=f"p2p-reader-{peer_id}",
             )
 
+            self._dial_failures.pop(peer_id, None)
             logger.info("🔗 P2P connected: %s ↔ %s  (%s:%d)",
                         self.agent_id, peer_id, ip, port)
 
         except asyncio.TimeoutError:
-            logger.debug("⏱️ P2P timeout connecting to %s (%s:%d) — relay fallback",
-                         peer_id, ip, port)
+            self._log_dial_failure(peer_id, ip, port, "timeout")
             if writer:
                 writer.close()
         except Exception as exc:
-            logger.debug("⚠️ P2P connect to %s (%s:%d) failed: %s — relay fallback",
-                         peer_id, ip, port, exc)
+            self._log_dial_failure(peer_id, ip, port, str(exc))
             if writer:
                 writer.close()
+
+    def _log_dial_failure(self, peer_id: str, ip: str, port: int, reason: str) -> None:
+        """Dial failures are WARNING (a silent dial failure is exactly what
+        made 'P2P never connects' undiagnosable), but throttled: the
+        reconnect loop retries every 30s, so a permanently unreachable peer
+        logs the first 3 attempts and every 10th after that."""
+        count = self._dial_failures.get(peer_id, 0) + 1
+        self._dial_failures[peer_id] = count
+        log = logger.warning if (count <= 3 or count % 10 == 0) else logger.debug
+        log("⚠️ P2P dial %s (%s:%d) failed (attempt %d): %s — relay fallback",
+            peer_id, ip, port, count, reason)
 
     # ── Incoming connections ───────────────────────────────────────────
 
@@ -435,10 +469,10 @@ class P2PManager:
                         peer_id, peer_ip, peer_port)
 
         except asyncio.TimeoutError:
-            logger.debug("⏱️ P2P incoming timeout from %s:%s", peer_ip, peer_port)
+            logger.info("⏱️ P2P incoming timeout from %s:%s", peer_ip, peer_port)
             writer.close()
         except Exception as exc:
-            logger.debug("⚠️ P2P incoming error from %s:%s: %s", peer_ip, peer_port, exc)
+            logger.warning("⚠️ P2P incoming error from %s:%s: %s", peer_ip, peer_port, exc)
             writer.close()
 
     async def _reject(self, writer: asyncio.StreamWriter, reason: str) -> None:

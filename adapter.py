@@ -157,6 +157,7 @@ def _get_p2p_manager():
     try:
         from .p2p import P2PManager  # type: ignore[import]
         _P2P_MANAGER_CLS = P2PManager
+        _bridge_p2p_logger(P2PManager)
         return P2PManager
     except ImportError:
         pass
@@ -177,7 +178,43 @@ def _get_p2p_manager():
         logger.warning("P2P unavailable: failed to load %s: %s", path, exc)
         return None
     _P2P_MANAGER_CLS = getattr(mod, "P2PManager", None)
+    if _P2P_MANAGER_CLS is not None:
+        _bridge_p2p_logger(_P2P_MANAGER_CLS)
     return _P2P_MANAGER_CLS
+
+
+def _bridge_p2p_logger(cls: Any) -> None:
+    """Re-home p2p.py's module logger under the gateway logger hierarchy.
+
+    The gateway's logging config only surfaces ``gateway.*`` loggers, so
+    p2p.py's default ``agent-bus.p2p`` logger never reached the gateway
+    log output. Swapping the module-level ``logger`` makes every P2P log
+    line appear as ``gateway.platforms.agentbus.p2p``.
+    """
+    try:
+        import sys
+        mod = sys.modules.get(cls.__module__)
+        if mod is not None and hasattr(mod, "logger"):
+            mod.logger = logger.getChild("p2p")
+    except Exception:
+        pass
+
+
+def _http_api_base(server_url: str, http_port: int) -> str:
+    """Build the HTTP API base URL from the WebSocket server URL.
+
+    The bus runs TWO listeners: WebSocket (default 9876) and HTTP API
+    (default 9877). Replacing only the scheme keeps the WS port and hits
+    the websockets server, which answers ``426 Upgrade Required`` — the
+    bug that silently broke /discover. The HTTP port must be substituted
+    explicitly.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(server_url)
+    scheme = "https" if parsed.scheme in ("wss", "https") else "http"
+    host = parsed.hostname or "localhost"
+    return f"{scheme}://{host}:{http_port}"
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -299,18 +336,25 @@ class AgentBusAdapter(BasePlatformAdapter):
         self._connected = False
         self._send_lock = asyncio.Lock()
 
-        # P2P direct connections
+        # P2P direct connections.
+        # NOTE: 0 is a valid value ("disable P2P"), so `or`-chaining would
+        # silently re-enable the default — check for absence explicitly.
         self._p2p: Any | None = None
-        self._p2p_port: int = int(
-            extra.get("p2p_port")
-            or os.environ.get("AGENT_BUS_P2P_PORT")
-            or "9878"
-        )
-        self._http_port: int = int(
-            extra.get("http_port")
-            or os.environ.get("AGENT_BUS_HTTP_PORT")
-            or "9877"
-        )
+        self._p2p_port = self._int_config(extra, "p2p_port", "AGENT_BUS_P2P_PORT", 9878)
+        self._http_port = self._int_config(extra, "http_port", "AGENT_BUS_HTTP_PORT", 9877)
+        self._discover_task: asyncio.Task | None = None
+        self._last_route: dict[str, str] = {}  # target → "p2p" | "relay"
+
+    @staticmethod
+    def _int_config(extra: dict, key: str, env_var: str, default: int) -> int:
+        for raw in (extra.get(key), os.environ.get(env_var)):
+            if raw is not None and str(raw).strip() != "":
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    logger.warning("Invalid %s=%r — using %d", key, raw, default)
+                    return default
+        return default
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -330,8 +374,14 @@ class AgentBusAdapter(BasePlatformAdapter):
         # Start the P2P listener BEFORE registering: ports can be busy, so
         # the listener may bind a different port than configured, and the
         # agent card must advertise the port we actually listen on.
+        # On gateway reconnect the existing manager (listener, peer table,
+        # live connections) is reused — peers don't see a P2P flap just
+        # because the WS to the server dropped.
         _P2PManager_cls = _get_p2p_manager()
-        if _P2PManager_cls is not None and self._p2p_port > 0:
+        if self._p2p is not None and getattr(self._p2p, "_running", False):
+            logger.info("P2P manager already running (port=%d, %d peer(s)) — reusing",
+                        self._p2p.p2p_port, self._p2p.peer_count)
+        elif _P2PManager_cls is not None and self._p2p_port > 0:
             try:
                 self._p2p = _P2PManager_cls(
                     agent_id=self._agent_id,
@@ -391,9 +441,17 @@ class AgentBusAdapter(BasePlatformAdapter):
 
             self._connected = True
 
-            # Fetch peer table from server's /discover endpoint
+            # Fetch peer table from server's /discover endpoint, then keep
+            # it fresh periodically. The periodic loop doubles as the retry
+            # path for peers whose first dial failed and heals the table
+            # after server restarts or missed agent_joined events.
             if self._p2p:
                 await self._discover_peers()
+                if self._discover_task is None or self._discover_task.done():
+                    self._discover_task = asyncio.create_task(
+                        self._discover_loop(),
+                        name=f"agentbus-discover-{self._agent_id}",
+                    )
 
             # Start background reader for incoming messages
             self._reader_task = asyncio.create_task(
@@ -424,6 +482,14 @@ class AgentBusAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         """Disconnect from the AgentBus server and stop P2P."""
         self._connected = False
+
+        if self._discover_task and not self._discover_task.done():
+            self._discover_task.cancel()
+            try:
+                await self._discover_task
+            except asyncio.CancelledError:
+                pass
+        self._discover_task = None
 
         # Stop P2P manager first
         if self._p2p:
@@ -488,12 +554,14 @@ class AgentBusAdapter(BasePlatformAdapter):
         if self._p2p and chat_id:
             sent = await self._p2p.send(chat_id, msg_payload["message"])
             if sent:
+                self._log_route(chat_id, "p2p")
                 return SendResult(success=True)
 
         # Fall back to server relay
         try:
             async with self._send_lock:
                 await self._ws.send(json.dumps(msg_payload))
+            self._log_route(chat_id or "<broadcast>", "relay")
             return SendResult(success=True)
         except Exception as exc:
             logger.error("Send failed to %s: %s", chat_id, exc)
@@ -503,34 +571,67 @@ class AgentBusAdapter(BasePlatformAdapter):
                 retryable=True,
             )
 
+    def _log_route(self, target: str, route: str) -> None:
+        """Log the transport per message; route CHANGES are promoted to INFO
+        so 'why is everything relayed?' is answerable from default logs."""
+        if self._last_route.get(target) != route:
+            self._last_route[target] = route
+            logger.info("📡 route to %s: %s", target, route)
+        else:
+            logger.debug("→ %s via %s", target, route)
+
     # ── P2P direct connections ──────────────────────────────────────────
 
     async def _discover_peers(self) -> None:
-        """Fetch P2P routing table from server's /discover endpoint."""
+        """Fetch P2P routing table from server's /discover endpoint.
+
+        Failures here mean P2P silently degrades to relay-only, so every
+        failure path logs at WARNING — never debug.
+        """
         if not self._p2p:
             return
         try:
             import httpx
-            api_base = self._server_url.replace("ws://", "http://").replace("wss://", "https://")
-            if "://" in api_base:
-                parts = api_base.split("/")
-                api_base = "/".join(parts[:3])
-
-            resp = httpx.get(
-                f"{api_base}/discover",
+        except ImportError:
+            logger.warning("P2P discover unavailable: httpx not installed "
+                           "(pip install httpx) — relay only")
+            return
+        # /discover lives on the HTTP API port (9877), NOT the WS port.
+        url = f"{_http_api_base(self._server_url, self._http_port)}/discover"
+        try:
+            # httpx.get is blocking — keep it off the event loop.
+            resp = await asyncio.to_thread(
+                httpx.get,
+                url,
                 headers={"X-Agent-Token": self._bus_token},
                 timeout=10,
             )
-            if resp.status_code == 200:
-                data = resp.json()
-                if data.get("status") == "ok":
-                    await self._p2p.update_peers(data)
-                    logger.info("📋 P2P routing table: %d peer(s) discovered",
-                                data.get("count", 0))
-            else:
-                logger.debug("P2P discover returned %d", resp.status_code)
+            if resp.status_code != 200:
+                logger.warning("P2P discover %s returned HTTP %d — relay only",
+                               url, resp.status_code)
+                return
+            data = resp.json()
+            if data.get("status") != "ok":
+                logger.warning("P2P discover %s returned status=%r — relay only",
+                               url, data.get("status"))
+                return
+            await self._p2p.update_peers(data)
+            peers = data.get("peers", {})
+            others = [p for p in peers if p != self._agent_id]
+            logger.info("📋 P2P discover: %d peer(s) advertised, %d connected",
+                        len(others), self._p2p.peer_count)
         except Exception as exc:
-            logger.debug("P2P discover failed: %s", exc)
+            logger.warning("P2P discover %s failed: %s — relay only", url, exc)
+
+    async def _discover_loop(self) -> None:
+        """Refresh the P2P peer table periodically (retry + self-healing)."""
+        try:
+            while self._connected:
+                await asyncio.sleep(60)
+                if self._connected and self._p2p:
+                    await self._discover_peers()
+        except asyncio.CancelledError:
+            pass
 
     async def _on_p2p_message(self, message: dict) -> None:
         """Handle a message received via direct P2P connection."""
@@ -597,7 +698,12 @@ class AgentBusAdapter(BasePlatformAdapter):
                     if self._p2p:
                         asyncio.create_task(self._discover_peers())
                 elif msg_type == "agent_left":
-                    logger.info("Agent left: %s", data.get("agent_id"))
+                    left_id = data.get("agent_id")
+                    logger.info("Agent left: %s", left_id)
+                    # Drop the direct connection and stop redialing it
+                    if self._p2p and left_id:
+                        asyncio.create_task(self._p2p.forget_peer(left_id))
+                        self._last_route.pop(left_id, None)
                 elif msg_type == "agents_list":
                     # Refresh P2P routing table from fresh agent list
                     if self._p2p:
@@ -673,19 +779,15 @@ def _standalone_send(
 
     token = _get_config("token")
     server = _get_config("server") or "ws://100.64.0.9:9876"
-    api_base = server.replace("ws://", "http://").replace("wss://", "https://")
-
-    # Only keep host:port
-    if "://" in api_base:
-        parts = api_base.split("/")
-        api_base = "/".join(parts[:3])  # http://host:port
+    http_port = int(os.environ.get("AGENT_BUS_HTTP_PORT") or "9877")
+    api_base = _http_api_base(server, http_port)
 
     if not token:
         return {"success": False, "error": "AgentBus token not configured"}
 
     try:
         resp = httpx.post(
-            f"{api_base}/send",
+            f"{api_base}/message",
             json={
                 "token": token,
                 "message": {
