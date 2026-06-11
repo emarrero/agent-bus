@@ -134,11 +134,28 @@ except ImportError:
 from gateway.config import Platform
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 
-# P2P direct connections
-try:
-    from agent_bus.p2p import P2PManager
-except ImportError:
-    P2PManager = None  # type: ignore[assignment]
+
+# ── Lazy P2P import (imported at connect time, not module level) ─────────
+
+def _get_p2p_manager():
+    """Try to import P2PManager from various paths.
+
+    Called at connect() time so the plugin system has already added
+    the plugin directory to sys.path.
+    """
+    for _import_path in [
+        "agent_bus.p2p",   # pip install -e / PYTHONPATH
+        "agentbus.p2p",    # plugin dir package name
+    ]:
+        try:
+            import importlib
+            _mod = importlib.import_module(_import_path)
+            _cls = getattr(_mod, "P2PManager", None)
+            if _cls is not None:
+                return _cls
+        except (ImportError, AttributeError):
+            continue
+    return None
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -261,7 +278,7 @@ class AgentBusAdapter(BasePlatformAdapter):
         self._send_lock = asyncio.Lock()
 
         # P2P direct connections
-        self._p2p: P2PManager | None = None
+        self._p2p: Any | None = None
         self._p2p_port: int = int(
             extra.get("p2p_port")
             or os.environ.get("AGENT_BUS_P2P_PORT")
@@ -330,9 +347,10 @@ class AgentBusAdapter(BasePlatformAdapter):
             self._connected = True
 
             # Start P2P manager for direct agent-to-agent connections
-            if P2PManager is not None and self._p2p_port > 0:
+            _P2PManager_cls = _get_p2p_manager()
+            if _P2PManager_cls is not None and self._p2p_port > 0:
                 try:
-                    self._p2p = P2PManager(
+                    self._p2p = _P2PManager_cls(
                         agent_id=self._agent_id,
                         p2p_port=self._p2p_port,
                     )
@@ -346,7 +364,7 @@ class AgentBusAdapter(BasePlatformAdapter):
                     self._p2p = None
             else:
                 logger.info("P2P disabled (port=%s, P2PManager=%s)",
-                            self._p2p_port, P2PManager)
+                            self._p2p_port, _P2PManager_cls)
 
             # Start background reader for incoming messages
             self._reader_task = asyncio.create_task(
