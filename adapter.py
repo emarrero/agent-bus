@@ -138,18 +138,30 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 # ── Lazy P2P import (imported at connect time, not module level) ─────────
 
 def _get_p2p_manager():
-    """Try to import P2PManager from various paths.
+    """Try to import P2PManager from wherever it lives.
+
+    Tries, in order:
+    1. Local p2p.py (same directory — works in any plugin setup)
+    2. agent_bus.p2p  (pip install -e / PYTHONPATH)
+    3. agentbus.p2p   (plugin dir named 'agentbus')
 
     Called at connect() time so the plugin system has already added
-    the plugin directory to sys.path.
+    its directories to sys.path.
     """
+    import sys as _sys, os as _os
+    # Add our own directory so 'import p2p' works regardless of package name
+    _plugin_dir = _os.path.dirname(_os.path.abspath(__file__))
+    if _plugin_dir not in _sys.path:
+        _sys.path.insert(0, _plugin_dir)
+
     for _import_path in [
-        "agent_bus.p2p",   # pip install -e / PYTHONPATH
-        "agentbus.p2p",    # plugin dir package name
+        "p2p",              # local file (always works when in sys.path)
+        "agent_bus.p2p",    # pip install -e / PYTHONPATH
+        "agentbus.p2p",     # plugin dir named 'agentbus'
     ]:
         try:
-            import importlib
-            _mod = importlib.import_module(_import_path)
+            import importlib as _il
+            _mod = _il.import_module(_import_path)
             _cls = getattr(_mod, "P2PManager", None)
             if _cls is not None:
                 return _cls
