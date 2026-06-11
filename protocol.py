@@ -27,6 +27,9 @@ class MessageType(str, Enum):
     ERROR = "error"
     P2P_HELLO = "p2p_hello"
     P2P_HELLO_ACK = "p2p_hello_ack"
+    P2P_AUTH = "p2p_auth"
+    P2P_PING = "p2p_ping"
+    P2P_PONG = "p2p_pong"
     P2P_PEER_UPDATE = "p2p_peer_update"
 
 

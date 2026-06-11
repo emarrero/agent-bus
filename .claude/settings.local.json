@@ -19,7 +19,19 @@
       "Bash(sed -i '' 's/\"source\": \"mariana\"/\"source\": \"your-agent\"/g' AGENTBUS_COMPLETE_EN.md AGENTBUS_COMPLETE.md)",
       "Bash(sed -i '' 's/\"target\": \"hal\"/\"target\": \"other-agent\"/g' AGENTBUS_COMPLETE_EN.md AGENTBUS_COMPLETE.md)",
       "Bash(sed -i '' 's/\"target\": \"oracle\"/\"target\": \"other-agent\"/g' AGENTBUS_COMPLETE_EN.md AGENTBUS_COMPLETE.md)",
-      "Bash(grep -rn \"ALLOW_ALL\\\\|allow_all\" ~/.hermes/plugins/agentbus/ 2>/dev/null | head -20 || echo \"not found in ~/.hermes\")"
+      "Bash(grep -rn \"ALLOW_ALL\\\\|allow_all\" ~/.hermes/plugins/agentbus/ 2>/dev/null | head -20 || echo \"not found in ~/.hermes\")",
+      "Bash(sed -n 260,300p /Users/emarrero/agent-bus/server_ws.py)",
+      "Bash(sed -n 790,830p /Users/emarrero/agent-bus/server_ws.py)",
+      "Bash(python3 -m py_compile p2p.py adapter.py protocol.py)",
+      "Bash(python3 test_p2p_v2.py)",
+      "Bash(awk '{print $2}')",
+      "Bash(kill 71990 71988)",
+      "Bash(python3 -u test_p2p_v2.py)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(pkill -f test_p2p_v2)",
+      "Bash(python3 -u -c ' *)",
+      "Bash(python3 -c ' *)",
+      "Read(//Users/emarrero/.hermes/agent_bus/**)"
     ]
   }
 }

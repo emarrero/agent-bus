@@ -13,4 +13,4 @@ from .adapter import register
 from .p2p import P2PManager
 
 __all__ = ["register", "P2PManager"]
-__version__ = "0.6.0"
+__version__ = "0.7.0"

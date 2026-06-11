@@ -135,39 +135,49 @@ from gateway.config import Platform
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 
 
-# ── Lazy P2P import (imported at connect time, not module level) ─────────
+# ── P2P import: always load the sibling p2p.py, zero configuration ───────
+
+_P2P_MANAGER_CLS: Any = None
+
 
 def _get_p2p_manager():
-    """Try to import P2PManager from wherever it lives.
+    """Load P2PManager from the p2p.py sitting next to this file.
 
-    Tries, in order:
-    1. Local p2p.py (same directory — works in any plugin setup)
-    2. agent_bus.p2p  (pip install -e / PYTHONPATH)
-    3. agentbus.p2p   (plugin dir named 'agentbus')
+    Two paths, no sys.path mutation, no PYTHONPATH, no package-name guessing:
 
-    Called at connect() time so the plugin system has already added
-    its directories to sys.path.
+    1. Relative import — works whenever this module was loaded as part of
+       a package (``agent_bus``, ``agentbus``, or any other name).
+    2. Direct file load via importlib — works when the plugin loader
+       executed adapter.py as a flat module with no package context.
     """
-    import sys as _sys, os as _os
-    # Add our own directory so 'import p2p' works regardless of package name
-    _plugin_dir = _os.path.dirname(_os.path.abspath(__file__))
-    if _plugin_dir not in _sys.path:
-        _sys.path.insert(0, _plugin_dir)
+    global _P2P_MANAGER_CLS
+    if _P2P_MANAGER_CLS is not None:
+        return _P2P_MANAGER_CLS
 
-    for _import_path in [
-        "p2p",              # local file (always works when in sys.path)
-        "agent_bus.p2p",    # pip install -e / PYTHONPATH
-        "agentbus.p2p",     # plugin dir named 'agentbus'
-    ]:
-        try:
-            import importlib as _il
-            _mod = _il.import_module(_import_path)
-            _cls = getattr(_mod, "P2PManager", None)
-            if _cls is not None:
-                return _cls
-        except (ImportError, AttributeError):
-            continue
-    return None
+    try:
+        from .p2p import P2PManager  # type: ignore[import]
+        _P2P_MANAGER_CLS = P2PManager
+        return P2PManager
+    except ImportError:
+        pass
+
+    import importlib.util
+    import sys
+
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "p2p.py")
+    if not os.path.exists(path):
+        logger.warning("P2P unavailable: %s not found", path)
+        return None
+    try:
+        spec = importlib.util.spec_from_file_location("_agentbus_p2p", path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["_agentbus_p2p"] = mod
+        spec.loader.exec_module(mod)
+    except Exception as exc:
+        logger.warning("P2P unavailable: failed to load %s: %s", path, exc)
+        return None
+    _P2P_MANAGER_CLS = getattr(mod, "P2PManager", None)
+    return _P2P_MANAGER_CLS
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -317,6 +327,26 @@ class AgentBusAdapter(BasePlatformAdapter):
             logger.error("AgentBus token not configured")
             return False
 
+        # Start the P2P listener BEFORE registering: ports can be busy, so
+        # the listener may bind a different port than configured, and the
+        # agent card must advertise the port we actually listen on.
+        _P2PManager_cls = _get_p2p_manager()
+        if _P2PManager_cls is not None and self._p2p_port > 0:
+            try:
+                self._p2p = _P2PManager_cls(
+                    agent_id=self._agent_id,
+                    p2p_port=self._p2p_port,
+                    token=self._bus_token,
+                )
+                self._p2p.on_message(self._on_p2p_message)
+                await self._p2p.start()
+            except Exception as exc:
+                logger.warning("P2P init failed (relay fallback): %s", exc)
+                self._p2p = None
+        else:
+            logger.info("P2P disabled (port=%s, P2PManager=%s)",
+                        self._p2p_port, _P2PManager_cls)
+
         try:
             self._ws = await websockets.connect(self._server_url)
             logger.info(
@@ -326,12 +356,12 @@ class AgentBusAdapter(BasePlatformAdapter):
                 self._display_name,
             )
 
-            # Build agent card
+            # Build agent card — advertise the ACTUAL bound P2P port
             card = {
                 "name": self._display_name,
                 "skills": self._skills,
                 "modalities": ["text"],
-                "p2p_port": self._p2p_port if self._p2p_port > 0 else 0,
+                "p2p_port": self._p2p.p2p_port if self._p2p else 0,
             }
 
             # Register
@@ -351,6 +381,9 @@ class AgentBusAdapter(BasePlatformAdapter):
                 logger.error("Registration failed: %s", error_msg)
                 await self._ws.close()
                 self._ws = None
+                if self._p2p:
+                    await self._p2p.stop()
+                    self._p2p = None
                 return False
 
             # Read agents_list (always follows registration response)
@@ -358,25 +391,9 @@ class AgentBusAdapter(BasePlatformAdapter):
 
             self._connected = True
 
-            # Start P2P manager for direct agent-to-agent connections
-            _P2PManager_cls = _get_p2p_manager()
-            if _P2PManager_cls is not None and self._p2p_port > 0:
-                try:
-                    self._p2p = _P2PManager_cls(
-                        agent_id=self._agent_id,
-                        p2p_port=self._p2p_port,
-                    )
-                    self._p2p.on_message(self._on_p2p_message)
-                    await self._p2p.start()
-
-                    # Fetch peer table from server's /discover endpoint
-                    await self._discover_peers()
-                except Exception as exc:
-                    logger.warning("P2P init failed (relay fallback): %s", exc)
-                    self._p2p = None
-            else:
-                logger.info("P2P disabled (port=%s, P2PManager=%s)",
-                            self._p2p_port, _P2PManager_cls)
+            # Fetch peer table from server's /discover endpoint
+            if self._p2p:
+                await self._discover_peers()
 
             # Start background reader for incoming messages
             self._reader_task = asyncio.create_task(
@@ -396,6 +413,12 @@ class AgentBusAdapter(BasePlatformAdapter):
             if self._ws:
                 await self._ws.close()
                 self._ws = None
+            if self._p2p:
+                try:
+                    await self._p2p.stop()
+                except Exception:
+                    pass
+                self._p2p = None
             return False
 
     async def disconnect(self) -> None:
