@@ -65,7 +65,12 @@
       "Bash(rm -rf /tmp/aboldpkg /tmp/abflat)",
       "Bash(python3 -m py_compile server/*.py client/*.py plugin/*.py tests/*.py)",
       "Bash(bash install.sh --dry-run --token TESTTOK --server ws://localhost:9876 --agent-id testbot)",
-      "Bash(bash scripts/install-server.sh --dry-run)"
+      "Bash(bash scripts/install-server.sh --dry-run)",
+      "Bash(python3 -m py_compile __init__.py plugin/*.py)",
+      "Bash(curl -s --max-time 5 -H \"X-Agent-Token: 68fd11d8d1740996c6da70c70cc4d2a3\" \"http://100.64.0.9:9877/agents\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\([a['agent_id'] for a in d['agents']]\\)\")",
+      "Bash(python3 -m py_compile plugin/adapter.py client/p2p.py)",
+      "Bash(rm -rf /tmp/abre; git add plugin/adapter.py client/p2p.py && git status --short)"
     ]
   }
 }

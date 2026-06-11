@@ -407,6 +407,13 @@ class P2PManager:
 
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=HANDSHAKE_TIMEOUT)
+            if not raw:
+                # Connection closed without sending anything — port scans
+                # and health probes (nc -z) do this; not worth a warning.
+                logger.debug("P2P probe from %s:%s (closed without data)",
+                             peer_ip, peer_port)
+                writer.close()
+                return
             data = json.loads(raw.decode().strip())
 
             if data.get("type") != "p2p_hello":

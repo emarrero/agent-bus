@@ -26,7 +26,7 @@ except ImportError:
     register = _mod.register
 
 __all__ = ["register", "P2PManager"]
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 
 def __getattr__(name):

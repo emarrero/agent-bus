@@ -13,4 +13,4 @@ Production deployment:
     sudo bash scripts/install-server.sh --ws-port 9876 --http-port 9877
 """
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

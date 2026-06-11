@@ -353,6 +353,13 @@ class AgentBusAdapter(BasePlatformAdapter):
         self._discover_task: asyncio.Task | None = None
         self._last_route: dict[str, str] = {}  # target → "p2p" | "relay"
 
+        # WS auto-reconnect: the relay connection can die quietly ("no close
+        # frame received or sent") and the gateway harness never re-dials —
+        # without this the agent silently drops off the bus while P2P keeps
+        # working, which is worse than a clean failure.
+        self._closing = False
+        self._ws_reconnect_task: asyncio.Task | None = None
+
     @staticmethod
     def _int_config(extra: dict, key: str, env_var: str, default: int) -> int:
         for raw in (extra.get(key), os.environ.get(env_var)):
@@ -379,17 +386,22 @@ class AgentBusAdapter(BasePlatformAdapter):
             logger.error("AgentBus token not configured")
             return False
 
+        self._closing = False
+
         # Start the P2P listener BEFORE registering: ports can be busy, so
         # the listener may bind a different port than configured, and the
         # agent card must advertise the port we actually listen on.
-        # On gateway reconnect the existing manager (listener, peer table,
+        # On gateway/WS reconnect the existing manager (listener, peer table,
         # live connections) is reused — peers don't see a P2P flap just
-        # because the WS to the server dropped.
+        # because the WS to the server dropped. A failed WS attempt must
+        # therefore only tear down a P2P manager it created itself.
+        created_p2p = False
         _P2PManager_cls = _get_p2p_manager()
         if self._p2p is not None and getattr(self._p2p, "_running", False):
             logger.info("P2P manager already running (port=%d, %d peer(s)) — reusing",
                         self._p2p.p2p_port, self._p2p.peer_count)
         elif _P2PManager_cls is not None and self._p2p_port > 0:
+            created_p2p = True
             try:
                 self._p2p = _P2PManager_cls(
                     agent_id=self._agent_id,
@@ -439,7 +451,7 @@ class AgentBusAdapter(BasePlatformAdapter):
                 logger.error("Registration failed: %s", error_msg)
                 await self._ws.close()
                 self._ws = None
-                if self._p2p:
+                if self._p2p and created_p2p:
                     await self._p2p.stop()
                     self._p2p = None
                 return False
@@ -479,7 +491,7 @@ class AgentBusAdapter(BasePlatformAdapter):
             if self._ws:
                 await self._ws.close()
                 self._ws = None
-            if self._p2p:
+            if self._p2p and created_p2p:
                 try:
                     await self._p2p.stop()
                 except Exception:
@@ -489,7 +501,16 @@ class AgentBusAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Disconnect from the AgentBus server and stop P2P."""
+        self._closing = True
         self._connected = False
+
+        if self._ws_reconnect_task and not self._ws_reconnect_task.done():
+            self._ws_reconnect_task.cancel()
+            try:
+                await self._ws_reconnect_task
+            except asyncio.CancelledError:
+                pass
+        self._ws_reconnect_task = None
 
         if self._discover_task and not self._discover_task.done():
             self._discover_task.cancel()
@@ -725,6 +746,32 @@ class AgentBusAdapter(BasePlatformAdapter):
                 logger.warning("Reader error: %s", exc)
         finally:
             self._connected = False
+            # The relay WS died on its own (server restart, network blip,
+            # idle timeout). Re-dial with backoff — nobody else will.
+            if not self._closing:
+                logger.warning("AgentBus WS dropped — auto-reconnecting "
+                               "(P2P connections unaffected)")
+                if self._ws_reconnect_task is None or self._ws_reconnect_task.done():
+                    self._ws_reconnect_task = asyncio.create_task(
+                        self._reconnect_ws_loop(),
+                        name=f"agentbus-ws-reconnect-{self._agent_id}",
+                    )
+
+    async def _reconnect_ws_loop(self) -> None:
+        """Re-dial the relay WS until it's back (exponential backoff to 60s)."""
+        delay = 5.0
+        try:
+            while not self._closing and not self._connected:
+                try:
+                    if await self.connect():
+                        logger.info("✅ AgentBus WS reconnected and re-registered")
+                        return
+                except Exception as exc:
+                    logger.warning("AgentBus WS reconnect attempt failed: %s", exc)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 60.0)
+        except asyncio.CancelledError:
+            pass
 
     async def _on_new_message(self, data: dict) -> None:
         """Handle an incoming message from another agent."""
