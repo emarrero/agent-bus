@@ -8,4 +8,4 @@ Inspired by Google's A2A (Agent-to-Agent) protocol.
 from .adapter import register
 
 __all__ = ["register"]
-__version__ = "0.4.0"
+__version__ = "0.5.0"

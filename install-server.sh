@@ -211,6 +211,7 @@ step "Step 1 — Installing server files…"
 
 SERVER_FILES=(
     "__init__.py"
+    "adapter.py"
     "server.py"
     "server_ws.py"
     "protocol.py"

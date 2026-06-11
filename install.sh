@@ -266,6 +266,7 @@ else
     # Files that belong to the library (exclude runtime/data files)
     PY_FILES=(
         __init__.py __main__.py
+        adapter.py
         bus.py cli.py client.py
         hermes_agent.py multimodal.py
         protocol.py router.py
@@ -299,7 +300,7 @@ fi
 
 step "Step 2 — Installing Hermes plugin…"
 
-PLUGIN_SRC="$SCRIPT_DIR/plugin"
+PLUGIN_SRC="$SCRIPT_DIR"
 
 # The plugin source must ship the three files the Hermes loader needs:
 #   __init__.py  — entry point (loader imports this and calls register())
